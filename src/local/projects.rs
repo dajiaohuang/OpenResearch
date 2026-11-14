@@ -80,6 +80,7 @@ fn prepare_path(
     clone_url: Option<&str>,
     shallow_clone: bool,
     paper_pdf: Option<&[u8]>,
+    created_blank_folder: &mut bool,
 ) -> Result<PathBuf> {
     let path = expand_path(path)?;
     if let Some(url) = clone_url.map(str::trim).filter(|url| !url.is_empty()) {
@@ -108,7 +109,15 @@ fn prepare_path(
                 path.display()
             ));
         }
-        std::fs::create_dir_all(&path)?;
+        if require_new_folder {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::create_dir(&path)?;
+            *created_blank_folder = true;
+        } else {
+            std::fs::create_dir_all(&path)?;
+        }
     } else if !path.is_dir() {
         return Err(crate::error::anyhow!("{} is not a folder", path.display()));
     }
@@ -185,7 +194,8 @@ pub fn create_project(
         paper_pdf,
     } = options;
     let slug = unique_project_slug(store, &slugify(name))?;
-    let repo_path = prepare_path(
+    let mut created_blank_folder = false;
+    let repo_path = match prepare_path(
         path,
         create_folder,
         require_new_folder,
@@ -193,9 +203,34 @@ pub fn create_project(
         clone_url.as_deref(),
         shallow_clone,
         paper_pdf.as_deref(),
-    )?;
+        &mut created_blank_folder,
+    ) {
+        Ok(path) => path,
+        Err(error) if created_blank_folder => {
+            let path = expand_path(path)?;
+            if let Err(cleanup_error) = std::fs::remove_dir(&path) {
+                return Err(crate::error::anyhow!(
+                    "{error}; could not remove the project folder {}: {cleanup_error}. Check its contents before retrying.",
+                    path.display()
+                ));
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let explain_retained_folder = |error: crate::error::Error| {
+        if created_blank_folder {
+            crate::error::anyhow!(
+                "{error}; the project folder {} was retained. After fixing the error, add it using an existing folder.",
+                repo_path.display()
+            )
+        } else {
+            error
+        }
+    };
     if store
-        .list_local_projects()?
+        .list_local_projects()
+        .map_err(&explain_retained_folder)?
         .iter()
         .any(|project| Path::new(&project.repo_path) == repo_path)
     {
@@ -204,7 +239,8 @@ pub fn create_project(
             repo_path.display()
         ));
     }
-    let baseline_branch = git::require_current_branch(&repo_path)?;
+    let baseline_branch =
+        git::require_current_branch(&repo_path).map_err(&explain_retained_folder)?;
     let publication = git::github_publication(&repo_path);
     let (github_owner, github_repo) = publication.unwrap_or_default();
 
@@ -224,7 +260,9 @@ pub fn create_project(
         created_at: now,
         updated_at: now,
     };
-    store.create_local_project(&project)?;
+    store
+        .create_local_project(&project)
+        .map_err(explain_retained_folder)?;
     Ok(project)
 }
 
@@ -597,6 +635,86 @@ pub struct CreateProjectOptions {
 mod tests {
     use super::*;
     use std::fs::File;
+
+    #[test]
+    fn retry_blank_project_after_git_failure_without_removing_existing_folders() {
+        if !crate::config::in_test_child(&["GIT_CONFIG_COUNT"]) {
+            return;
+        }
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let destination = root.join("blank");
+        let existing = root.join("existing");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("research.txt"), "keep").unwrap();
+        std::env::set_var("GIT_CONFIG_COUNT", "invalid");
+        let options = || CreateProjectOptions {
+            create_folder: true,
+            require_new_folder: true,
+            initialize_git: true,
+            ..Default::default()
+        };
+        let first = create_project(&store, "Retry", destination.to_str().unwrap(), options());
+        let import = create_project(
+            &store,
+            "Existing",
+            existing.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        );
+        std::env::remove_var("GIT_CONFIG_COUNT");
+        assert!(first.unwrap_err().to_string().contains("GIT_CONFIG_COUNT"));
+        assert!(import.unwrap_err().to_string().contains("GIT_CONFIG_COUNT"));
+        assert_eq!(
+            std::fs::read_to_string(existing.join("research.txt")).unwrap(),
+            "keep"
+        );
+        assert!(!destination.exists());
+        create_project(&store, "Retry", destination.to_str().unwrap(), options()).unwrap();
+    }
+
+    #[test]
+    fn retry_project_after_store_failure_preserves_the_repository() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let connection = rusqlite::Connection::open(root.join("data/orx.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_project BEFORE INSERT ON local_projects BEGIN SELECT RAISE(FAIL, 'synthetic storage failure'); END;").unwrap();
+        let destination = root.join("project");
+        let error = create_project(
+            &store,
+            "Retry",
+            destination.to_str().unwrap(),
+            CreateProjectOptions {
+                create_folder: true,
+                require_new_folder: true,
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("synthetic storage failure"), "{error}");
+        assert!(error.contains("existing folder"), "{error}");
+        assert!(destination.join(".git").is_dir());
+        std::fs::write(destination.join("research.txt"), "keep").unwrap();
+        connection
+            .execute_batch("DROP TRIGGER reject_project")
+            .unwrap();
+        create_project(
+            &store,
+            "Retry",
+            destination.to_str().unwrap(),
+            CreateProjectOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("research.txt")).unwrap(),
+            "keep"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!("orx-local-project-{}", uuid::Uuid::new_v4()))
