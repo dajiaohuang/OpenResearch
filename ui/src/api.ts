@@ -2853,6 +2853,9 @@ export function createApi(
   const getArtifacts = (projectId: string, signal?: AbortSignal) =>
     get<ProjectArtifacts>(`/api/projects/${projectId}/files`, signal);
 
+  const searchArtifacts = (projectId: string, query: string, signal?: AbortSignal) =>
+    get<ProjectArtifacts>(`/api/projects/${projectId}/files/search?${new URLSearchParams({ q: query })}`, signal);
+
   /** Delete a file or folder in the artifacts directory. */
   const deleteArtifact = (projectId: string, path: string) =>
     writeResponse(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
@@ -3446,6 +3449,7 @@ export function createApi(
     logoutOpenResearch,
     addOpenResearchSshKey,
     getArtifacts,
+    searchArtifacts,
     deleteArtifact,
     manageArtifactFile,
     revealArtifactInManager,

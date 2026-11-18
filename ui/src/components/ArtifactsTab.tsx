@@ -34,7 +34,8 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { isExternalMarkdownTarget, rehypeNetworkImages, resolveMarkdownTarget } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
-import { filterArtifactEntries, sortArtifactEntries, type ArtifactOrder } from "./artifactTreeModel";
+import { sortArtifactEntries, type ArtifactOrder } from "./artifactTreeModel";
+import { useDebouncedValue } from "./NewProjectForm";
 import { OptionPicker } from "./ModelPicker";
 import {
   FileContextMenu,
@@ -527,6 +528,7 @@ export function ArtifactsTab({
   const runtime = useRuntime();
   const storageProjectId = runtime.kind === "ssh" ? `${encodeURIComponent(runtime.session.host)}:${project.id}` : project.id;
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<{ projectId: string; entry: ArtifactEntry | null } | null>(null);
   // Folders are open by default — including ones that appear later — so this
   // tracks what the user closed instead.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(storageProjectId));
@@ -535,6 +537,14 @@ export function ArtifactsTab({
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [order, setOrder] = useState<ArtifactOrder>("name");
   const [filter, setFilter] = useState("");
+  const debouncedFilter = useDebouncedValue(filter.trim(), 250);
+  const filterActive = filter.trim() !== "";
+  const search = useQuery({
+    queryKey: workspace.workspaceKey("searchArtifacts", project.id, debouncedFilter),
+    queryFn: ({ signal }) => workspace.api.searchArtifacts(project.id, debouncedFilter, signal),
+    enabled: filterActive && debouncedFilter === filter.trim(),
+    retry: false,
+  });
   // Folders closed while a filter is active; the saved set stays untouched.
   const [filterCollapsed, setFilterCollapsed] = useState(NO_COLLAPSED_DIRS);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -585,18 +595,16 @@ export function ArtifactsTab({
   useEffect(() => {
     if (!selected || !artifacts) return;
     const entry = findArtifactEntry(artifacts.entries, selected);
-    if (!entry || entry.isDir) setSelected(null);
+    if ((!entry || entry.isDir) && !artifacts.truncated) setSelected(null);
   }, [selected, artifacts]);
 
   const sortedEntries = useMemo(
     () => (artifacts ? sortArtifactEntries(artifacts.entries, order) : []),
     [artifacts, order],
   );
-  const visibleEntries = useMemo(
-    () => (filter.trim() ? filterArtifactEntries(sortedEntries, filter) : sortedEntries),
-    [sortedEntries, filter],
-  );
-  const filterActive = filter.trim() !== "";
+  const visibleEntries = useMemo(() => filterActive
+    ? (debouncedFilter === filter.trim() && search.data ? sortArtifactEntries(search.data.entries, order) : [])
+    : sortedEntries, [filterActive, debouncedFilter, filter, search.data, order, sortedEntries]);
   // Each new filter shows every match expanded — the user's saved collapsed
   // set would hide what they just searched for.
   const treeCollapsed = filterActive ? filterCollapsed : collapsed;
@@ -650,7 +658,7 @@ export function ArtifactsTab({
       collapsed={treeCollapsed}
       selected={selected}
       onToggle={toggle}
-      onSelect={setSelected}
+      onSelect={(path) => { setSelected(path); setSelectedSnapshot({ projectId: project.id, entry: findArtifactEntry(visibleEntries, path) }); }}
       onOpenFile={onOpenFile}
       onDelete={remove}
       renamingPath={renamingPath}
@@ -664,7 +672,7 @@ export function ArtifactsTab({
       onCancelRename={() => setRenamingPath(null)}
     />
   );
-  const selectedEntry = selected ? findArtifactEntry(artifacts.entries, selected) : null;
+  const selectedEntry = selected ? findArtifactEntry(artifacts.entries, selected) ?? (selectedSnapshot?.projectId === project.id && selectedSnapshot.entry?.path === selected ? selectedSnapshot.entry : null) : null;
 
   if (artifacts.entries.length === 0) {
     return (
@@ -749,10 +757,12 @@ export function ArtifactsTab({
         </div>
         <div data-keyboard-list className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
           {tree(visibleEntries)}
-          {artifacts.truncated && (
+          {filterActive && (search.isFetching || debouncedFilter !== filter.trim()) && <LoadingRow><Spinner /> {m.artifacts_tab_loading_artifacts()}</LoadingRow>}
+          {filterActive && debouncedFilter === filter.trim() && search.error && <p role="alert">{search.error instanceof Error ? search.error.message : String(search.error)}</p>}
+          {(filterActive ? search.data?.truncated : artifacts.truncated) && (
             <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
           )}
-          {visibleEntries.length === 0 && artifacts.entries.length > 0 && (
+          {filterActive && !search.isFetching && !search.error && debouncedFilter === filter.trim() && search.data && visibleEntries.length === 0 && (
             <p className="m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_filter_no_match()}</p>
           )}
         </div>

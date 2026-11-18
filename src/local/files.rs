@@ -478,6 +478,194 @@ pub fn list(project: &LocalProject) -> Result<ArtifactsListing> {
     })
 }
 
+/// Search the whole visible tree, limiting matches rather than entries visited.
+pub fn search(project: &LocalProject, query: &str) -> Result<ArtifactsListing> {
+    let dir = ensure_dir(project)?;
+    let canonical = crate::paths::canonicalize(&dir)?;
+    let mut ancestors = vec![canonical.clone()];
+    let mut count = 0;
+    let (entries, truncated) = search_tree(
+        &canonical,
+        &canonical,
+        "",
+        &query.to_lowercase(),
+        &mut ancestors,
+        &mut count,
+    )?;
+    Ok(ArtifactsListing {
+        dir: dir.to_string_lossy().into_owned(),
+        entries,
+        truncated,
+    })
+}
+
+fn search_tree(
+    base: &Path,
+    dir: &Path,
+    prefix: &str,
+    needle: &str,
+    ancestors: &mut Vec<PathBuf>,
+    count: &mut usize,
+) -> Result<(Vec<ArtifactEntry>, bool)> {
+    let mut result = Vec::new();
+    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_ignored(&name) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        let target = if file_type.is_symlink() {
+            let target = crate::paths::canonicalize(entry.path())?;
+            if !target.starts_with(base) {
+                continue;
+            }
+            target
+        } else {
+            entry.path()
+        };
+        let metadata = std::fs::metadata(&target)?;
+        if !metadata.is_dir() && !metadata.is_file() {
+            continue;
+        }
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let matched = path.to_lowercase().contains(needle);
+        if matched {
+            if *count >= MAX_ENTRIES {
+                return Ok((result, true));
+            }
+            *count += 1;
+        }
+        let mut children = Vec::new();
+        let mut truncated = false;
+        if metadata.is_dir() {
+            let canonical = crate::paths::canonicalize(&target)?;
+            if !ancestors.contains(&canonical) {
+                ancestors.push(canonical);
+                (children, truncated) =
+                    search_tree(base, &target, &path, needle, ancestors, count)?;
+                ancestors.pop();
+            }
+        }
+        if matched || !children.is_empty() {
+            result.push(ArtifactEntry {
+                name,
+                path: path.clone(),
+                is_dir: metadata.is_dir(),
+                size: if metadata.is_dir() { 0 } else { metadata.len() },
+                modified_at: mtime_ms(&metadata),
+                presentation: if metadata.is_file() {
+                    Some(presentation_for_path(&path))
+                } else {
+                    None
+                },
+                children,
+            });
+        }
+        if truncated {
+            return Ok((result, true));
+        }
+    }
+    result.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+    Ok((result, false))
+}
+
+#[cfg(test)]
+mod issue_524_reproduction {
+    use super::*;
+
+    #[test]
+    fn truncated_listing_omits_existing_artifact_paths() {
+        let root = std::env::temp_dir().join(format!("orx-524-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..(MAX_ENTRIES + 1) {
+            std::fs::write(root.join(format!("result-{index:04}.txt")), b"result").unwrap();
+        }
+        let canonical = crate::paths::canonicalize(&root).unwrap();
+        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
+        assert!(truncated);
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        let omitted = (0..(MAX_ENTRIES + 1))
+            .map(|index| format!("result-{index:04}.txt"))
+            .find(|name| !entries.iter().any(|entry| &entry.name == name))
+            .unwrap();
+        assert!(root.join(&omitted).is_file());
+        let (found, search_truncated) = search_tree(
+            &canonical,
+            &canonical,
+            "",
+            &omitted.to_lowercase(),
+            &mut vec![canonical.clone()],
+            &mut 0,
+        )
+        .unwrap();
+        assert!(!search_truncated);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, omitted);
+        let (many, capped) = search_tree(
+            &canonical,
+            &canonical,
+            "",
+            "result",
+            &mut vec![canonical.clone()],
+            &mut 0,
+        )
+        .unwrap();
+        assert!(capped);
+        assert_eq!(many.len(), MAX_ENTRIES);
+        assert!(search_tree(
+            &canonical,
+            &canonical.join("missing"),
+            "",
+            "result",
+            &mut vec![canonical.clone()],
+            &mut 0
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn search_stops_at_junction_cycles() {
+        let root = std::env::temp_dir().join(format!("orx-524-cycle-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("find-me.txt"), "found").unwrap();
+        let junction = nested.join("loop");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let canonical = crate::paths::canonicalize(&root).unwrap();
+        let (entries, truncated) = search_tree(
+            &canonical,
+            &canonical,
+            "",
+            "find-me",
+            &mut vec![canonical.clone()],
+            &mut 0,
+        )
+        .unwrap();
+        assert!(!truncated);
+        assert_eq!(entries[0].children[0].path, "nested/find-me.txt");
+        std::fs::remove_dir(&junction).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// A contained artifact path suitable for streaming without buffering.
 pub fn file_path(project: &LocalProject, rel_path: &str) -> Result<PathBuf> {
     resolve_contained(&files_dir(project), rel_path)

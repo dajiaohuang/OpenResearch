@@ -789,6 +789,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
                 .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
+        .route("/api/projects/{id}/files/search", get(search_artifacts))
         .route(
             "/api/projects/{id}/files/reveal",
             post(reveal_artifact_file),
@@ -5339,6 +5340,34 @@ async fn list_artifacts(State(state): State<AppState>, Path(id): Path<String>) -
             .ok_or_else(|| not_found("project"))?;
         let listing = local::files::list(&project)?;
         Ok(Json(json!(listing)))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ArtifactSearchQuery {
+    q: String,
+}
+
+async fn search_artifacts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ArtifactSearchQuery>,
+) -> ApiResult {
+    let q = query.q.trim().to_string();
+    if q.is_empty() {
+        return Err(bad_request("search query is required"));
+    }
+    blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        Ok(Json(json!(local::files::search(&project, &q)?)))
     })
     .await
 }
