@@ -1029,15 +1029,20 @@ fn session_uploads_stale_in(root: &Path, worktree: &Path, skills_dir_rel: &str) 
     // Listing helpers used by the picker intentionally omit unreadable entries.
     // Freshness must instead report uncertainty rather than treating an
     // unavailable upload store as an empty, up-to-date catalog.
-    match fs::read_dir(store_dir(root)) {
+    let source_root = store_dir(root);
+    let mut sources = Vec::new();
+    match fs::read_dir(&source_root) {
         Ok(entries) => {
             for entry in entries {
                 let Ok(entry) = entry else { return true };
-                let Ok(kind) = entry.file_type() else {
+                let Ok(kind) = entry.metadata() else {
                     return true;
                 };
-                if kind.is_dir() && read_uploaded_at(&entry.path()).is_err() {
-                    return true;
+                if kind.is_dir() {
+                    let Ok(skill) = read_uploaded_at(&entry.path()) else {
+                        return true;
+                    };
+                    sources.push((skill.name.clone(), source_root.join(skill.name)));
                 }
             }
         }
@@ -1046,7 +1051,6 @@ fn session_uploads_stale_in(root: &Path, worktree: &Path, skills_dir_rel: &str) 
     }
     let base = worktree.join(skills_dir_rel);
     let previous = previously_managed(&base).unwrap_or_default();
-    let sources = source_dirs(root, &[]);
     for (name, src) in &sources {
         let dest = base.join(name);
         if dest.exists() && !previous.contains(name) {
