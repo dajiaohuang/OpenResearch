@@ -39,7 +39,6 @@ test("search shows an artifact beyond the loaded tree", async () => {
   assert.equal(row.getAttribute("aria-pressed"), "true");
   await view.unmount();
 });
-
 test("search reports a server read error instead of showing no matches", async () => {
   const base = { name: "base.txt", path: "base.txt", isDir: false, size: 1, modifiedAt: 0, presentation: "text" };
   serve((path) => {
@@ -59,5 +58,20 @@ test("search reports a server read error instead of showing no matches", async (
   await settle();
   assert.match(document.querySelector('[role="alert"]').textContent, /read failed/);
   assert.ok(!document.body.textContent.includes(m.artifacts_filter_no_match()));
+  await view.unmount();
+});
+
+test("artifact root can be revealed on a local workspace", async () => {
+  const base = { name: "base.txt", path: "base.txt", isDir: false, size: 1, modifiedAt: 0, presentation: "text" };
+  let body;
+  serve((path, init) => {
+    if (path === "/api/projects/p/files/reveal") { body = JSON.parse(init.body); return { ok: true }; }
+    return undefined;
+  });
+  const tab = createElement(ArtifactsTab, { project: { id: "p" }, artifacts: { dir: "/artifacts", entries: [base] }, onOpenFile() {}, canRenameFile() { return false; } });
+  const view = await render(createElement(RuntimeContext, { value: { kind: "local" } }, tab));
+  await act(async () => view.container.querySelector(`[aria-label="${m.file_viewer_reveal_in_file_manager()}"]`).click());
+  await settle();
+  assert.deepEqual(body, { path: "" });
   await view.unmount();
 });

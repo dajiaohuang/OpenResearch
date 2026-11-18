@@ -14,6 +14,7 @@ import {
   ExternalLink,
   Code,
   Filter,
+  FolderOpen,
   MousePointerClick,
   Package,
   Trash2,
@@ -710,6 +711,11 @@ export function ArtifactsTab({
               />
             </Tooltip>
             <span className="flex-1" />
+            {!remote && <Tooltip interactive content={m.file_viewer_reveal_in_file_manager()}>
+              <IconButton size="small" aria-label={m.file_viewer_reveal_in_file_manager()} onClick={() => void reveal("")}>
+                <FolderOpen size={16} />
+              </IconButton>
+            </Tooltip>}
             <Tooltip interactive content={m.artifacts_filter()}>
               <IconButton
                 size="small"

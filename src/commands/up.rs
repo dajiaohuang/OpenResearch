@@ -5518,8 +5518,13 @@ async fn reveal_artifact_file(
         let project = store
             .get_local_project(&id)?
             .ok_or_else(|| not_found("project"))?;
-        let full = local::files::file_path(&project, &req.path)
-            .map_err(|e| ApiError::from(anyhow!("could not resolve artifact: {e}")))?;
+        let full = if req.path.is_empty() {
+            crate::paths::canonicalize(local::files::files_dir(&project))
+                .map_err(|e| ApiError::from(anyhow!("could not resolve artifact root: {e}")))?
+        } else {
+            local::files::file_path(&project, &req.path)
+                .map_err(|e| ApiError::from(anyhow!("could not resolve artifact: {e}")))?
+        };
         crate::editors::reveal_in_file_manager(&full)
             .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
         Ok(Json(json!({ "ok": true })))
