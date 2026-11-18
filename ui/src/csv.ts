@@ -25,6 +25,7 @@ export function parseCsv(text: string, delimiter: string): string[][] {
   let row: string[] = [];
   let field = "";
   let quoted = false;
+  let hadQuotedField = false;
 
   const endField = () => {
     row.push(field);
@@ -32,8 +33,9 @@ export function parseCsv(text: string, delimiter: string): string[][] {
   };
   const endRow = () => {
     endField();
-    if (row.length > 1 || row[0] !== "") rows.push(row);
+    if (row.length > 1 || row[0] !== "" || hadQuotedField) rows.push(row);
     row = [];
+    hadQuotedField = false;
   };
 
   const start = text.charCodeAt(0) === 0xfeff ? 1 : 0;
@@ -45,7 +47,10 @@ export function parseCsv(text: string, delimiter: string): string[][] {
         field += '"';
         i++;
       } else quoted = false;
-    } else if (char === '"' && field === "") quoted = true;
+    } else if (char === '"' && field === "") {
+      quoted = true;
+      hadQuotedField = true;
+    }
     else if (char === delimiter) endField();
     else if (char === "\n") endRow();
     else if (char === "\r") {
@@ -53,7 +58,7 @@ export function parseCsv(text: string, delimiter: string): string[][] {
       if (text[i + 1] === "\n") i++;
     } else field += char;
   }
-  if (field !== "" || row.length > 0) endRow();
+  if (field !== "" || row.length > 0 || hadQuotedField) endRow();
 
   return rows;
 }

@@ -18,6 +18,11 @@ test("a trailing delimiter keeps its empty field", () => {
   assert.deepEqual(parseCsv("a,b,\n1,,", ","), [["a", "b", ""], ["1", "", ""]]);
 });
 
+test("quoted empty records are retained while blank lines are skipped", () => {
+  assert.deepEqual(parseCsv('value\n""\n\nalpha\n""', ","), [["value"], [""], ["alpha"], [""]]);
+  assert.deepEqual(parseCsv('value\tother\r\n""\tx\r\n\r\nalpha\ty', "\t"), [["value", "other"], ["", "x"], ["alpha", "y"]]);
+});
+
 test("an unterminated quote runs to the end of the input", () => {
   assert.deepEqual(parseCsv('a,"b\nc', ","), [["a", "b\nc"]]);
 });
