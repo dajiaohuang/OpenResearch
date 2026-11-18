@@ -1026,6 +1026,24 @@ pub fn session_uploads_snapshot(worktree: &Path, skills_dir_rel: &str) -> Result
 }
 
 fn session_uploads_stale_in(root: &Path, worktree: &Path, skills_dir_rel: &str) -> bool {
+    // Listing helpers used by the picker intentionally omit unreadable entries.
+    // Freshness must instead report uncertainty rather than treating an
+    // unavailable upload store as an empty, up-to-date catalog.
+    match fs::read_dir(store_dir(root)) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else { return true };
+                let Ok(kind) = entry.file_type() else {
+                    return true;
+                };
+                if kind.is_dir() && read_uploaded_at(&entry.path()).is_err() {
+                    return true;
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return true,
+    }
     let base = worktree.join(skills_dir_rel);
     let previous = previously_managed(&base).unwrap_or_default();
     let sources = source_dirs(root, &[]);
@@ -2189,6 +2207,17 @@ mod tests {
         fs::write(project_skill.join("SKILL.md"), skill_md("project-owned")).unwrap();
         save_skill_md_in(&root, skill_md("project-owned").as_bytes()).unwrap();
         assert!(!session_uploads_stale_in(&root, &wt, rel));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn session_uploads_stale_when_upload_store_cannot_be_read() {
+        let root = temp_root();
+        let wt = temp_root();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(store_dir(&root), b"not a directory").unwrap();
+        assert!(session_uploads_stale_in(&root, &wt, ".opencode/skills"));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&wt);
     }
