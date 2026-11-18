@@ -13,6 +13,7 @@ import {
   ChevronRight,
   ExternalLink,
   Code,
+  Copy,
   Filter,
   FolderOpen,
   MousePointerClick,
@@ -221,7 +222,18 @@ function PreviewPane({
 }) {
   const { showConfirmDialog } = useWorkspace().dialogs;
 
-  const { artifactUrl } = useWorkspace().api;
+  const { artifactUrl, fileLocation } = useWorkspace().api;
+
+  const copyLocation = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
+      const location = await fileLocation(projectId, { path: entry.path, source: "artifact" });
+      await navigator.clipboard.writeText(location.path);
+      showAlert(m.common_copied(), "success");
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
 
   const kind = previewKind(entry);
   const version = useFileVersion(artifactUrl(projectId, entry.path));
@@ -277,6 +289,11 @@ function PreviewPane({
         <span className="fpreview-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(entry.path)}>
           {entry.name}
         </span>
+        <Tooltip interactive content={m.artifacts_copy_path()}>
+          <IconButton size="small" aria-label={m.artifacts_copy_path()} onClick={() => void copyLocation()}>
+            <Copy size={14} />
+          </IconButton>
+        </Tooltip>
         <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0 @max-xl:hidden">
           {m.artifacts_tab_modified()}{" "}
           {new Date(entry.modifiedAt).toLocaleString(getLocale(), {
@@ -642,6 +659,12 @@ export function ArtifactsTab({
     }
   };
 
+  const revealRoot = !remote && <Tooltip interactive content={m.file_viewer_reveal_in_file_manager()}>
+    <IconButton size="small" aria-label={m.file_viewer_reveal_in_file_manager()} onClick={() => void reveal("")}>
+      <FolderOpen size={16} />
+    </IconButton>
+  </Tooltip>;
+
   if (!artifacts) {
     return (
       <div className="files-tab h-full min-h-0 flex bg-background">
@@ -677,11 +700,14 @@ export function ArtifactsTab({
 
   if (artifacts.entries.length === 0) {
     return (
-      <WorkspaceEmptyState
-        icon={Package}
-        title={m.artifacts_tab_no_artifacts_yet()}
-        description={m.artifacts_tab_this_is_the_project_s_durable_output_space()}
-      />
+      <div className="relative flex h-full w-full">
+        <WorkspaceEmptyState
+          icon={Package}
+          title={m.artifacts_tab_no_artifacts_yet()}
+          description={m.artifacts_tab_this_is_the_project_s_durable_output_space()}
+        />
+        <div className="absolute end-3 top-2">{revealRoot}</div>
+      </div>
     );
   }
 
@@ -711,11 +737,7 @@ export function ArtifactsTab({
               />
             </Tooltip>
             <span className="flex-1" />
-            {!remote && <Tooltip interactive content={m.file_viewer_reveal_in_file_manager()}>
-              <IconButton size="small" aria-label={m.file_viewer_reveal_in_file_manager()} onClick={() => void reveal("")}>
-                <FolderOpen size={16} />
-              </IconButton>
-            </Tooltip>}
+            {revealRoot}
             <Tooltip interactive content={m.artifacts_filter()}>
               <IconButton
                 size="small"
