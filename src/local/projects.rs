@@ -304,8 +304,10 @@ pub fn promote_scratch_project(
         promoted.repo_path = crate::paths::canonicalize(&target)?
             .to_string_lossy()
             .into_owned();
+        let tx = store.begin_immediate()?;
         store.update_local_project(&promoted)?;
         store.restamp_local_project_created(&promoted.id)?;
+        tx.commit()?;
         Ok(promoted)
     })();
     let promoted = match moved {
@@ -1537,6 +1539,33 @@ mod tests {
         assert_eq!(scratch_project(&store).unwrap().id, first.id);
 
         let _ = std::fs::remove_dir_all(&first.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_promotion_restores_repository_and_project_record() {
+        let root = root();
+        let data = root.join("data");
+        let store = Store::open_at(data.clone()).unwrap();
+        let scratch = scratch_project(&store).unwrap();
+        let original = PathBuf::from(&scratch.repo_path);
+        let db = rusqlite::Connection::open(data.join("orx.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_restamp BEFORE UPDATE OF created_at ON local_projects BEGIN SELECT RAISE(ABORT, 'restamp failed'); END;").unwrap();
+        let target = root.join("project");
+
+        let error =
+            promote_scratch_project(&store, &scratch, None, "Named", target.to_str().unwrap())
+                .unwrap_err();
+
+        assert!(error.to_string().contains("restamp failed"));
+        assert!(original.exists());
+        assert!(!target.exists());
+        let current = store.get_local_project(&scratch.id).unwrap().unwrap();
+        assert_eq!(current.repo_path, scratch.repo_path);
+        assert_eq!(current.name, scratch.name);
+        assert_eq!(current.created_at, scratch.created_at);
+        drop(db);
+        let _ = std::fs::remove_dir_all(original);
         let _ = std::fs::remove_dir_all(root);
     }
 
