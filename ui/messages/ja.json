@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_description": "これらの指示はすべてのプロジェクトの OpenResearch チャットに適用されます。変更は次のターンから反映されます。",
   "workspace_active_experiments": "進行中の実験",
   "files_empty_description": "このワークスペースのファイルがここに表示されます。エージェントにファイルの作成を依頼して始めましょう。",
   "experiments_empty_description": "実験と実行履歴がここに表示されます。エージェントに実験の設定を依頼して始めましょう。",

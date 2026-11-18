@@ -5125,6 +5125,49 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
 }
 
 /** One settings section's content, shown in the middle pane in place of chat. */
+export function SharedInstructionsSettings() {
+  const { api } = useWorkspace();
+  const [loaded, setLoaded] = useState(false);
+  const [expected, setExpected] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const id = useId();
+  useEffect(() => {
+    const controller = new AbortController();
+    api.getSharedInstructions(controller.signal).then(({ content }) => {
+      setExpected(content);
+      setDraft(content ?? "");
+      setLoaded(true);
+    }).catch((err: unknown) => {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err));
+    });
+    return () => controller.abort();
+  }, [api]);
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await api.saveSharedInstructions(expected, draft);
+      setExpected(result.content);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <>
+    <h2>AGENTS.md</h2>
+    <p>{m.settings_shared_instructions_description()}</p>
+    {error && <p role="alert">{error}</p>}
+    {loaded && <div className="flex flex-col gap-3">
+      <label htmlFor={id}>AGENTS.md</label>
+      <Textarea id={id} rows={10} value={draft} onChange={(event) => setDraft(event.target.value)} />
+      <Button type="button" disabled={saving || draft === (expected ?? "")} onClick={() => void save()}>{m.common_save()}</Button>
+    </div>}
+  </>;
+}
+
 export function SettingsView({
   tab,
   project,
@@ -5185,6 +5228,9 @@ export function SettingsView({
         <>
           <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_agents_intro()}</p>
           <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <SharedInstructionsSettings />
+            </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AgentsTab remote={remote} />
             </section>

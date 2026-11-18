@@ -2617,6 +2617,12 @@ export function createApi(
 
   const getHfSettings = (signal?: AbortSignal) => get<HfSettings>("/api/settings/hf", signal);
 
+  const getSharedInstructions = (signal?: AbortSignal) =>
+    get<{ content: string | null }>("/api/settings/shared-instructions", signal);
+
+  const saveSharedInstructions = (expected: string | null, content: string) =>
+    post<{ content: string }>("/api/settings/shared-instructions", { expected, content });
+
   const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
 
   const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
@@ -3375,6 +3381,8 @@ export function createApi(
     getCodeTree,
     getSessionWorktree,
     getHfSettings,
+    getSharedInstructions,
+    saveSharedInstructions,
     saveHfToken,
     getTinkerSettings,
     saveTinkerKey,

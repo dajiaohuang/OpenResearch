@@ -111,6 +111,41 @@ fn shared_instructions_at(path: &std::path::Path) -> std::io::Result<Option<Stri
     }
 }
 
+/// Save only if the file still matches the content loaded by the editor.
+/// External writers do not share a lock, so this comparison is not atomic with
+/// respect to a concurrent write after the check.
+pub(crate) fn save_shared_instructions_at(
+    path: &std::path::Path,
+    expected: Option<&str>,
+    content: &str,
+) -> std::io::Result<bool> {
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if current.as_deref() != expected {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(path.parent().expect("instructions path has a parent"))?;
+    if current.is_none() {
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file.write_all(content.as_bytes())?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    } else {
+        crate::local::git::atomic_write_with_mode(path, content.as_bytes(), None)
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod shared_instructions_tests {
     use super::*;
@@ -136,6 +171,19 @@ mod shared_instructions_tests {
         );
         std::fs::write(&file, [0xff]).unwrap();
         assert!(shared_instructions_at(&file).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_editor_does_not_overwrite_external_change() {
+        let root = std::env::temp_dir().join(format!("orx-shared-save-{}", uuid::Uuid::new_v4()));
+        let file = root.join("AGENTS.md");
+        assert!(save_shared_instructions_at(&file, None, "initial").unwrap());
+        std::fs::write(&file, "external").unwrap();
+        assert!(!save_shared_instructions_at(&file, Some("initial"), "draft").unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "external");
+        assert!(save_shared_instructions_at(&file, Some("external"), "draft").unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "draft");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -801,6 +801,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
+            "/api/settings/shared-instructions",
+            get(get_shared_instructions).post(set_shared_instructions),
+        )
+        .route(
             "/api/settings/tinker",
             get(tinker_settings).post(set_tinker_key),
         )
@@ -5321,6 +5325,50 @@ async fn absolute_raw_file(
     )
     .await
     .map_err(ApiError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedInstructionsUpdate {
+    expected: Option<String>,
+    content: String,
+}
+
+async fn get_shared_instructions() -> ApiResult {
+    blocking_api(|| {
+        let path = crate::config::config_dir().join("AGENTS.md");
+        let content = match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(ApiError::from(anyhow!(
+                    "could not read shared instructions: {error}"
+                )))
+            }
+        };
+        Ok(Json(json!({ "content": content })))
+    })
+    .await
+}
+
+async fn set_shared_instructions(Json(req): Json<SharedInstructionsUpdate>) -> ApiResult {
+    blocking_api(move || {
+        let path = crate::config::config_dir().join("AGENTS.md");
+        let saved = crate::config::save_shared_instructions_at(
+            &path,
+            req.expected.as_deref(),
+            &req.content,
+        )
+        .map_err(|error| ApiError::from(anyhow!("could not save shared instructions: {error}")))?;
+        if !saved {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Shared instructions changed on disk; your draft was not saved.".into(),
+            ));
+        }
+        Ok(Json(json!({ "content": req.content })))
+    })
+    .await
 }
 
 // --- project artifacts ----------------------------------------------------
