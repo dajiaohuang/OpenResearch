@@ -1525,7 +1525,12 @@ impl From<PaperHit> for LitHit {
 
 /// `https://openalex.org/W123` (or any `.../W123`) → `W123`.
 fn strip_openalex_prefix(id: &str) -> &str {
-    id.rsplit('/').next().unwrap_or(id)
+    let path = id
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(id)
+        .trim_end_matches('/');
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// `https://doi.org/10.1101/x` / `doi:10.1101/x` → `10.1101/x`.
@@ -2862,6 +2867,14 @@ mod tests {
         assert_eq!(openalex_selector("W2919115771"), "W2919115771");
         assert_eq!(
             openalex_selector("https://openalex.org/W2919115771"),
+            "W2919115771"
+        );
+        assert_eq!(
+            openalex_selector("https://openalex.org/W2919115771/"),
+            "W2919115771"
+        );
+        assert_eq!(
+            openalex_selector("https://openalex.org/W2919115771/?source=search#work"),
             "W2919115771"
         );
     }
