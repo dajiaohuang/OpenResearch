@@ -1991,7 +1991,7 @@ async fn fetch_pubmed_articles(pmids: &[String]) -> Result<Vec<PubmedArticle>> {
 pub async fn discover_pubmed(
     query: &str,
     options: PubmedDiscoveryOptions<'_>,
-) -> Result<Vec<LitHit>> {
+) -> Result<(Vec<LitHit>, Vec<String>)> {
     let base = crate::config::pubmed_api_url();
     let url = pubmed_discovery_url(&base, query, &crate::config::ncbi_email(), options)?;
 
@@ -2001,6 +2001,26 @@ pub async fn discover_pubmed(
         idlist: Vec<String>,
         #[serde(rename = "ERROR")]
         error: Option<String>,
+        #[serde(default)]
+        errorlist: SearchErrors,
+        #[serde(default)]
+        warninglist: SearchWarnings,
+    }
+    #[derive(Default, Deserialize)]
+    struct SearchErrors {
+        #[serde(default)]
+        phrasesnotfound: Vec<String>,
+        #[serde(default)]
+        fieldsnotfound: Vec<String>,
+    }
+    #[derive(Default, Deserialize)]
+    struct SearchWarnings {
+        #[serde(default)]
+        phrasesignored: Vec<String>,
+        #[serde(default)]
+        quotedphrasesnotfound: Vec<String>,
+        #[serde(default)]
+        outputmessages: Vec<String>,
     }
     #[derive(Deserialize)]
     struct SearchResponse {
@@ -2014,18 +2034,40 @@ pub async fn discover_pubmed(
     if let Some(error) = result.error {
         return Err(anyhow!("PubMed search failed: {error}"));
     }
+    let mut feedback = Vec::new();
+    for (label, values) in [
+        ("phrase not found", result.errorlist.phrasesnotfound),
+        ("field not found", result.errorlist.fieldsnotfound),
+        ("phrase ignored", result.warninglist.phrasesignored),
+        (
+            "quoted phrase not found",
+            result.warninglist.quotedphrasesnotfound,
+        ),
+    ] {
+        feedback.extend(values.into_iter().map(|value| format!("{label}: {value}")));
+    }
+    feedback.extend(
+        result
+            .warninglist
+            .outputmessages
+            .into_iter()
+            .filter(|message| message != "No items found."),
+    );
     if result.idlist.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), feedback));
     }
 
     // efetch returns records in the order of the requested ids.
     let mut articles = fetch_pubmed_articles(&result.idlist).await?;
     rerank_pubmed_articles(&mut articles, options.prioritize);
-    Ok(articles
-        .into_iter()
-        .take(options.limit as usize)
-        .map(PubmedArticle::into_lit_hit)
-        .collect())
+    Ok((
+        articles
+            .into_iter()
+            .take(options.limit as usize)
+            .map(PubmedArticle::into_lit_hit)
+            .collect(),
+        feedback,
+    ))
 }
 
 fn rerank_pubmed_articles(articles: &mut [PubmedArticle], prioritize: &str) {
@@ -2992,6 +3034,55 @@ mod tests {
     }
 
     const LIMITED: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    #[tokio::test]
+    async fn pubmed_search_keeps_results_and_provider_feedback() {
+        if !crate::config::in_test_child(&["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) {
+            return;
+        }
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "PUBMED_API_URL",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move {
+            for body in [
+                r#"{"esearchresult":{"idlist":["111"],"errorlist":{"phrasesnotfound":["zzqqxxyy"],"fieldsnotfound":[]},"warninglist":{"phrasesignored":["ignored"],"quotedphrasesnotfound":[],"outputmessages":[]}}}"#,
+                r#"<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>111</PMID><Article><ArticleTitle>Synthetic result</ArticleTitle></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"#,
+                r#"{"esearchresult":{"idlist":[],"warninglist":{"outputmessages":["No items found."]}}}"#,
+                r#"{"esearchresult":{"idlist":[],"ERROR":"query rejected"}}"#,
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let options = super::PubmedDiscoveryOptions {
+            limit: 1,
+            published_after: None,
+            published_before: None,
+            prioritize: "default",
+        };
+        let (hits, feedback) = super::discover_pubmed("partial", options).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "111");
+        assert_eq!(
+            feedback,
+            ["phrase not found: zzqqxxyy", "phrase ignored: ignored"]
+        );
+        let (hits, feedback) = super::discover_pubmed("empty", options).await.unwrap();
+        assert!(hits.is_empty());
+        assert!(feedback.is_empty());
+        let error = super::discover_pubmed("bad", options).await.unwrap_err();
+        assert!(error.to_string().contains("query rejected"));
+        server.await.unwrap();
+    }
 
     async fn serve_statuses(
         responses: &'static [&'static str],
