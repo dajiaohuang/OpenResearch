@@ -458,22 +458,22 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub gpu: Option<String>,
     /// GPUs per instance (with `--gpu`; default 1).
-    #[arg(long)]
+    #[arg(long, requires = "gpu")]
     pub count: Option<i64>,
     /// Disk in GB (with `--gpu`; default 100).
-    #[arg(long)]
+    #[arg(long, requires = "gpu")]
     pub disk: Option<i64>,
     /// Provider to provision from (with `--gpu`), e.g. runpod, vast, lambda.
     /// Omit to pick the cheapest matching offer across providers (like the
     /// dashboard). See `orx compute` for providers; validated server-side.
-    #[arg(long)]
+    #[arg(long, requires = "gpu")]
     pub provider: Option<String>,
     /// Provision a CPU-only instance with this flavor: cpu5c (compute), cpu5g
     /// (general), or cpu5m (memory-optimized). Mutually exclusive with `--gpu`.
     #[arg(long)]
     pub cpu: Option<String>,
     /// vCPUs for a CPU instance (with `--cpu`): 2, 8, or 32 (default 8).
-    #[arg(long)]
+    #[arg(long, requires = "cpu")]
     pub vcpus: Option<i64>,
 }
 
@@ -1612,6 +1612,54 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn instance_create_rejects_options_for_the_wrong_compute_type() {
+        for args in [
+            vec![
+                "orx", "instance", "create", "org", "--cpu", "cpu5c", "--disk", "500",
+            ],
+            vec![
+                "orx", "instance", "create", "org", "--cpu", "cpu5c", "--count", "2",
+            ],
+            vec![
+                "orx",
+                "instance",
+                "create",
+                "org",
+                "--cpu",
+                "cpu5c",
+                "--provider",
+                "vast",
+            ],
+            vec![
+                "orx", "instance", "create", "org", "--gpu", "H100", "--vcpus", "32",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        for args in [
+            vec![
+                "orx", "instance", "create", "org", "--cpu", "cpu5c", "--vcpus", "32",
+            ],
+            vec![
+                "orx",
+                "instance",
+                "create",
+                "org",
+                "--gpu",
+                "H100",
+                "--count",
+                "2",
+                "--disk",
+                "500",
+                "--provider",
+                "vast",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+    }
 
     #[test]
     fn library_add_commands_are_distinct_from_reading_skill_docs() {
