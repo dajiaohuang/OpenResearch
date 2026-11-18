@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "完成",
   "chat_inbox_mark_done": "标记为完成",
   "chat_inbox_restore": "恢复",
-  "chat_inbox_done_empty": "标记为完成的对话会显示在这里。"
+  "chat_inbox_done_empty": "标记为完成的对话会显示在这里。",
+  "tree_fit_graph": "适应画布",
+  "tree_canvas_controls": "实验图。使用方向键平移。",
+  "tree_search_graph": "搜索实验",
+  "tree_all_statuses": "所有状态"
 }

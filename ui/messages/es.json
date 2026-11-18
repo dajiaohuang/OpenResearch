@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "Hecho",
   "chat_inbox_mark_done": "Marcar como hecho",
   "chat_inbox_restore": "Restaurar",
-  "chat_inbox_done_empty": "Aquí aparecen los chats que marques como hechos."
+  "chat_inbox_done_empty": "Aquí aparecen los chats que marques como hechos.",
+  "tree_fit_graph": "Ajustar gráfico",
+  "tree_canvas_controls": "Gráfico de experimentos. Usa las flechas para desplazarlo.",
+  "tree_search_graph": "Buscar experimentos",
+  "tree_all_statuses": "Todos los estados"
 }

@@ -1,4 +1,4 @@
-import { useContext, memo, useId, useMemo, useRef, useState } from "react";
+import { useContext, memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
@@ -11,6 +11,7 @@ import {
   Handle,
   Position,
   ReactFlow,
+  useNodesInitialized,
   type Edge,
   type Node,
   type NodeProps,
@@ -37,6 +38,7 @@ import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
 import { runDisplay, type RunDisplay } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { graphMatches, saveGraphMove } from "../experimentGraphFilter";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -442,6 +444,12 @@ const defaultEdgeOptions = {
   type: "default", // bezier
   style: { stroke: "var(--text)", strokeWidth: 1.5, opacity: 0.3 },
 };
+
+function FlowMeasurements({ onChange }: { onChange: (ready: boolean) => void }) {
+  const ready = useNodesInitialized();
+  useEffect(() => { onChange(ready); }, [ready, onChange]);
+  return null;
+}
 // A per-edge `style` replaces defaultEdgeOptions.style wholesale, so the
 // dashed variant re-carries the base stroke.
 const elidedEdgeStyle = { ...defaultEdgeOptions.style, strokeDasharray: "4 4" };
@@ -490,6 +498,15 @@ export function TreeView({
   onViewportChange: (viewport: Viewport) => void;
 }) {
   const flowRef = useRef<ReactFlowInstance<ExpFlowNode | ArchivedFlowNode | ElidedFlowNode> | null>(null);
+  const mounted = useRef(false);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const scopeRef = useRef({ project: project.id, task: agentSessionId });
+  if (scopeRef.current.project !== project.id || scopeRef.current.task !== agentSessionId) scopeRef.current = { project: project.id, task: agentSessionId };
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("all");
+  const [flowReady, setFlowReady] = useState(false);
+  const [nodesMeasured, setNodesMeasured] = useState(false);
+  useLayoutEffect(() => { setSearch(""); setStatus("all"); setFlowReady(false); setNodesMeasured(false); }, [project.id, agentSessionId]);
   const { nodes, edges } = useMemo(() => {
     const runsByExp = new Map<string, Run[]>();
     for (const run of runs) {
@@ -590,6 +607,22 @@ export function TreeView({
     onRestoreRegion,
   ]);
 
+  const filterActive = search.trim() !== "" || status !== "all";
+  const matches = useMemo(() => graphMatches(nodes.flatMap((node) => node.type === "exp" ? [{
+    id: node.id, title: node.data.exp.title ?? "", slug: node.data.exp.slug,
+    status: node.data.latestRun?.status ?? null,
+  }] : []), edges, search, status), [nodes, edges, search, status]);
+  const filteredNodes = filterActive ? nodes.filter((node) => matches.visible.has(node.id)).map((node) => ({
+    ...node, className: matches.matching.has(node.id) ? "ring-2 ring-focus rounded-md" : undefined,
+  })) : nodes;
+  const filteredEdges = filterActive ? edges.filter((edge) => matches.visible.has(edge.source) && matches.visible.has(edge.target)) : edges;
+  const results = nodes.filter((node): node is ExpFlowNode => node.type === "exp" && matches.matching.has(node.id));
+  const moveViewport = async (action: (flow: NonNullable<typeof flowRef.current>) => Promise<boolean>) => {
+    const flow = flowRef.current;
+    const scope = scopeRef.current;
+    if (flow) await saveGraphMove(flow, action, () => mounted.current && scopeRef.current === scope && flowRef.current === flow, (current) => current.getViewport(), onViewportChange);
+  };
+
   if (experiments.length === 0) {
     return (
       <div className={EMPTY_STATE_CLASS_NAME}>
@@ -610,19 +643,47 @@ export function TreeView({
   }
 
   return (
+    <div className="relative h-full w-full focus-visible:outline-2 focus-visible:outline-focus" tabIndex={0} aria-label={m.tree_canvas_controls()}
+      onKeyDown={(event) => {
+        if (!flowReady || !flowRef.current || event.target !== event.currentTarget || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+        const delta = event.key === "ArrowLeft" ? [80, 0] : event.key === "ArrowRight" ? [-80, 0] : event.key === "ArrowUp" ? [0, 80] : event.key === "ArrowDown" ? [0, -80] : null;
+        if (!delta) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void moveViewport((flow) => { const v = flow.getViewport(); return flow.setViewport({ ...v, x: v.x + delta[0], y: v.y + delta[1] }); });
+      }}>
+    <div className="absolute top-2 start-2 z-10 flex max-w-[calc(100%-1rem)] flex-wrap gap-1 rounded-md border border-border bg-background p-1">
+      <button type="button" className="rounded-sm px-2 py-1 text-sm hover:bg-surface" disabled={!flowReady || !nodesMeasured || filteredNodes.length === 0} onClick={() => void moveViewport((flow) => flow.fitView({ padding: 0.25, maxZoom: 1, minZoom: 0.000001 }))}>{m.tree_fit_graph()}</button>
+      <label className="flex items-center gap-1 text-sm">{m.tree_search_graph()}<input className="min-w-0 rounded-sm border border-border bg-background px-2 text-sm text-text" aria-label={m.tree_search_graph()} value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+      <label className="flex items-center gap-1 text-sm">{m.settings_page_status()}<select className="rounded-sm border border-border bg-background text-sm text-text" aria-label={m.settings_page_status()} value={status} onChange={(event) => setStatus(event.target.value)}>
+        <option value="all">{m.tree_all_statuses()}</option>
+        <option value="running">{m.status_running()}</option>
+        <option value="done">{m.status_done()}</option>
+        <option value="failed">{m.status_failed()}</option>
+      </select></label>
+      {filterActive && <button type="button" className="rounded-sm px-2 py-1 text-sm hover:bg-surface" onClick={() => { setSearch(""); setStatus("all"); }}>{m.artifacts_filter_clear()}</button>}
+      {filterActive && <div className="max-h-40 w-full overflow-y-auto" role="region" aria-label={m.tree_search_graph()}>
+        {results.length > 0 && <p role="status">{m.history_filtered_count({ shown: fmtNumber(results.length), total: fmtNumber(nodes.filter((node) => node.type === "exp").length) })}</p>}
+        {results.length === 0 ? <p>{m.artifacts_filter_no_match()}</p> : results.map((node) => <button key={node.id} type="button" disabled={!flowReady || !nodesMeasured} className="block w-full text-start" onClick={() => void moveViewport((flow) => {
+          const current = flow.getNode(node.id);
+          if (!current) return Promise.resolve(false);
+          return flow.setCenter(current.position.x + NODE_W / 2, current.position.y + NODE_H / 2, { zoom: Math.max(flow.getZoom(), 0.5) });
+        })}>{node.data.exp.title && <span dir="auto">{node.data.exp.title} </span>}<bdi dir="ltr">{node.data.exp.title ? `(${node.data.exp.slug})` : node.data.exp.slug}</bdi></button>)}
+      </div>}
+    </div>
     <ReactFlow
       data-keyboard-list
       className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // Saved viewports initialize on mount; a new scope needs its own canvas.
-      key={agentSessionId ?? "project"}
-      nodes={nodes}
-      edges={edges}
+      key={`${project.id}:${agentSessionId ?? "project"}`}
+      nodes={filteredNodes}
+      edges={filteredEdges}
       nodeTypes={nodeTypes}
       defaultEdgeOptions={defaultEdgeOptions}
       nodesDraggable={false}
       nodesConnectable={false}
       nodesFocusable={false}
-      onInit={(flow) => { flowRef.current = flow; }}
+      onInit={(flow) => { flowRef.current = flow; setFlowReady(true); }}
       onFocusCapture={(event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement) || !target.hasAttribute("data-keyboard-item") || !target.matches(":focus-visible")) return;
@@ -638,12 +699,14 @@ export function TreeView({
       }}
       onMoveStart={dismissTreeHoverCards}
       onMoveEnd={(event, nextViewport) => { if (event) onViewportChange(nextViewport); }}
-      minZoom={0.15}
+      minZoom={0.000001}
       defaultViewport={viewport ?? undefined}
       fitView={viewport === null}
       fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
     >
+      <FlowMeasurements onChange={setNodesMeasured} />
       <Background variant={BackgroundVariant.Dots} color="var(--dots-strong)" gap={28} size={1.6} />
     </ReactFlow>
+    </div>
   );
 }

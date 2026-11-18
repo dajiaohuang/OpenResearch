@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "تم",
   "chat_inbox_mark_done": "وضع علامة كمنتهية",
   "chat_inbox_restore": "استعادة",
-  "chat_inbox_done_empty": "تظهر هنا المحادثات التي تضع عليها علامة منتهية."
+  "chat_inbox_done_empty": "تظهر هنا المحادثات التي تضع عليها علامة منتهية.",
+  "tree_fit_graph": "ملاءمة الرسم",
+  "tree_canvas_controls": "رسم التجارب. استخدم مفاتيح الأسهم للتحريك.",
+  "tree_search_graph": "البحث في التجارب",
+  "tree_all_statuses": "كل الحالات"
 }

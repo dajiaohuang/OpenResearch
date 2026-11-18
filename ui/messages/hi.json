@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "हो गया",
   "chat_inbox_mark_done": "पूरा हुआ चिह्नित करें",
   "chat_inbox_restore": "पुनर्स्थापित करें",
-  "chat_inbox_done_empty": "जिन चैट को आप पूरा हुआ चिह्नित करेंगे, वे यहां दिखेंगी।"
+  "chat_inbox_done_empty": "जिन चैट को आप पूरा हुआ चिह्नित करेंगे, वे यहां दिखेंगी।",
+  "tree_fit_graph": "ग्राफ़ फ़िट करें",
+  "tree_canvas_controls": "प्रयोग ग्राफ़। पैन करने के लिए तीर कुंजियों का उपयोग करें।",
+  "tree_search_graph": "प्रयोग खोजें",
+  "tree_all_statuses": "सभी स्थितियाँ"
 }

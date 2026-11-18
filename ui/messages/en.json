@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "Done",
   "chat_inbox_mark_done": "Mark as done",
   "chat_inbox_restore": "Restore",
-  "chat_inbox_done_empty": "Chats you mark as done appear here."
+  "chat_inbox_done_empty": "Chats you mark as done appear here.",
+  "tree_fit_graph": "Fit graph",
+  "tree_canvas_controls": "Experiment graph. Use arrow keys to pan.",
+  "tree_search_graph": "Search experiments",
+  "tree_all_statuses": "All statuses"
 }

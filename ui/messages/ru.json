@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "Готово",
   "chat_inbox_mark_done": "Отметить как готовое",
   "chat_inbox_restore": "Восстановить",
-  "chat_inbox_done_empty": "Здесь появятся чаты, отмеченные как готовые."
+  "chat_inbox_done_empty": "Здесь появятся чаты, отмеченные как готовые.",
+  "tree_fit_graph": "Вместить граф",
+  "tree_canvas_controls": "Граф экспериментов. Перемещайте стрелками.",
+  "tree_search_graph": "Поиск экспериментов",
+  "tree_all_statuses": "Все состояния"
 }

@@ -2222,5 +2222,9 @@
   "chat_inbox_done_action": "Xong",
   "chat_inbox_mark_done": "Đánh dấu là xong",
   "chat_inbox_restore": "Khôi phục",
-  "chat_inbox_done_empty": "Các cuộc trò chuyện bạn đánh dấu là hoàn tất sẽ xuất hiện ở đây."
+  "chat_inbox_done_empty": "Các cuộc trò chuyện bạn đánh dấu là hoàn tất sẽ xuất hiện ở đây.",
+  "tree_fit_graph": "Vừa biểu đồ",
+  "tree_canvas_controls": "Biểu đồ thí nghiệm. Dùng phím mũi tên để di chuyển.",
+  "tree_search_graph": "Tìm thí nghiệm",
+  "tree_all_statuses": "Mọi trạng thái"
 }

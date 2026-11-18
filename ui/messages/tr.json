@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "Bitti",
   "chat_inbox_mark_done": "Bitti olarak işaretle",
   "chat_inbox_restore": "Geri yükle",
-  "chat_inbox_done_empty": "Bitti olarak işaretlediğiniz sohbetler burada görünür."
+  "chat_inbox_done_empty": "Bitti olarak işaretlediğiniz sohbetler burada görünür.",
+  "tree_fit_graph": "Grafiği sığdır",
+  "tree_canvas_controls": "Deney grafiği. Kaydırmak için ok tuşlarını kullanın.",
+  "tree_search_graph": "Deneylerde ara",
+  "tree_all_statuses": "Tüm durumlar"
 }

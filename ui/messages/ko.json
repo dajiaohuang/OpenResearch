@@ -2223,5 +2223,9 @@
   "chat_inbox_done_action": "완료",
   "chat_inbox_mark_done": "완료로 표시",
   "chat_inbox_restore": "복원",
-  "chat_inbox_done_empty": "완료로 표시한 채팅이 여기에 표시됩니다."
+  "chat_inbox_done_empty": "완료로 표시한 채팅이 여기에 표시됩니다.",
+  "tree_fit_graph": "그래프 맞추기",
+  "tree_canvas_controls": "실험 그래프. 화살표 키로 이동합니다.",
+  "tree_search_graph": "실험 검색",
+  "tree_all_statuses": "모든 상태"
 }
