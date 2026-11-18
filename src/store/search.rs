@@ -197,29 +197,19 @@ impl Store {
         }
         let lowered: Vec<_> = query.terms.iter().map(|term| term.to_lowercase()).collect();
         let mut indexed_terms = Vec::new();
-        let mut residual_terms = Vec::new();
         let mut short_terms = Vec::new();
         for term in &query.terms {
-            if term.chars().count() >= 3 && indexed_terms.len() < 16 {
-                indexed_terms.push(term);
-            } else if term.chars().count() >= 3 {
-                residual_terms.push(term);
+            if term.chars().count() >= 3 {
+                if !indexed_terms.contains(&term) {
+                    indexed_terms.push(term);
+                }
             } else {
                 short_terms.push(term.to_lowercase());
             }
         }
-        // For long terms beyond the first FTS group, use the same SQLite tokenizer
-        // rather than Rust lowercasing, whose Unicode case mapping can differ.
-        let residual_expressions: Vec<String> = residual_terms
-            .chunks(16)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
-            })
-            .collect();
+        // The 256-character input limit bounds this to at most 64 indexed
+        // terms. A single FTS query preserves its Unicode matching semantics
+        // without repeating a postings-list intersection for every candidate.
         let scan = indexed_terms.is_empty();
         if scan && !matches!(query.filter, SearchFilter::Chat(_)) {
             page.requires_longer_query = true;
@@ -269,9 +259,6 @@ impl Store {
         let mut text_statement = snapshot.prepare(
             "SELECT text, part_id, spawn_part_id FROM chat_search_parts WHERE message_rowid = ?1",
         )?;
-        let mut residual_statement = snapshot.prepare(
-            "SELECT EXISTS(SELECT 1 FROM chat_search WHERE chat_search MATCH ?1 AND rowid = ?2)",
-        )?;
         let mut after = query.after.clone();
         let mut last_hit = None;
         let mut branches: HashMap<String, HashSet<String>> = HashMap::new();
@@ -311,18 +298,6 @@ impl Store {
             let count = candidates.len();
             for (cursor, mut hit) in candidates {
                 after = Some(cursor.clone());
-                let mut residual_matches = true;
-                for expression in &residual_expressions {
-                    if !residual_statement.query_row(params![expression, cursor.rowid], |row| {
-                        row.get::<_, bool>(0)
-                    })? {
-                        residual_matches = false;
-                        break;
-                    }
-                }
-                if !residual_matches {
-                    continue;
-                }
                 let parts = text_statement
                     .query_map([cursor.rowid], |row| {
                         Ok((
