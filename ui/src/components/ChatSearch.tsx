@@ -118,6 +118,7 @@ export const ChatSearch = memo(function ChatSearch({ projectId, sessionId, proje
         || event.key.toLowerCase() === "g" && modified;
       if (!find && !next) return;
       const right = commandRegion(event.target) === "right";
+      if (find && right && event.target instanceof Element && event.target.closest("[data-file-find]")) return;
       if (embedded ? !right : right && document.querySelector(".right-pane [role=search]")) return;
       event.preventDefault();
       event.stopPropagation();

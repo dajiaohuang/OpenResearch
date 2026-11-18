@@ -165,6 +165,30 @@ test("Mod+F refocuses the existing find box while reading a preview", async () =
   assert.equal(mainFind.expanded, true);
 });
 
+test("an open chat find box yields shortcuts to a file search surface", async () => {
+  await renderFind(pane({ kind: "home", view: "experiments" }));
+  const preview = document.querySelector(".right-pane [data-workspace-content]");
+  preview.setAttribute("data-file-find", "true");
+  await act(async () => preview.focus());
+  assert.equal(await key("f", preview, { metaKey: true }), false);
+  assert.notEqual(document.activeElement, mainFind.field());
+});
+
+test("closing file search leaves the open chat search intact", async () => {
+  await renderFind(pane({ kind: "file", path: "paper.txt" }), {
+    "GET /api/projects/p/file": () => ({ path: "paper.txt", content: "alpha beta", root: "clone", notFound: false, binary: false, truncated: false, presentation: "text", version: "v1" }),
+  });
+  const editor = document.querySelector(".right-pane .file-view textarea");
+  assert.ok(editor);
+  await act(async () => editor.focus());
+  await key("f", editor, { ctrlKey: true });
+  const input = document.querySelector(`.right-pane input[aria-label="${m.pdf_preview_find()}"]`);
+  assert.ok(input);
+  await key("Escape", input);
+  assert.equal(document.querySelector(`.right-pane input[aria-label="${m.pdf_preview_find()}"]`), null);
+  assert.ok(mainFind.field(), "chat search remains open");
+});
+
 test("Enter pressed while results catch up opens the first result once they arrive", async () => {
   const reply = deferred();
   let first = true;

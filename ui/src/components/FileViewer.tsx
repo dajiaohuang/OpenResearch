@@ -50,6 +50,7 @@ import {
 } from "../markdownTarget";
 import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
+import { FileFind } from "./FileFind";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import type { TabOpenIntent } from "../tabPreview";
 import { CsvTable } from "./CsvTable";
@@ -251,6 +252,8 @@ export function FileViewer({
   const selectableContentRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const [copiedContents, setCopiedContents] = useState(false);
+  const [findRequest, setFindRequest] = useState<number | null>(null);
+  const findReturnFocus = useRef<HTMLElement | null>(null);
   const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const scrollPositionRef = useRef(scrollPosition);
   const data = loaded?.file ?? null;
@@ -435,6 +438,12 @@ export function FileViewer({
     !showingPdf;
   const canCopyContents = data !== null && !data.notFound && !data.binary && !mediaKind && !showingPdf;
   const canSelectContents = canCopyContents && !showingEditor && (!(isHtml || isCsv) || showSource);
+  const canFindContents = showingEditor || canSelectContents;
+
+  useHotkey("Mod+F", () => {
+    if (findRequest === null && document.activeElement instanceof HTMLElement) findReturnFocus.current = document.activeElement;
+    setFindRequest((request) => (request ?? 0) + 1);
+  }, { target: rootRef, enabled: canFindContents, ignoreInputs: false, requireReset: true });
 
   const copyContents = async () => {
     if (!data) return;
@@ -605,7 +614,7 @@ export function FileViewer({
   };
 
   return (
-    <div ref={rootRef} className="file-view flex flex-col h-full min-h-0 min-w-0">
+    <div ref={rootRef} data-file-find={canFindContents || undefined} className="file-view flex flex-col h-full min-h-0 min-w-0">
       <div className="file-view-header @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
         <FileTypeIcon name={filePath} />
         <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
@@ -835,6 +844,10 @@ export function FileViewer({
           {m.file_viewer_this_pdf_was_compiled_from_an_earlier_version()}
         </div>
       )}
+      {findRequest !== null && canFindContents && <FileFind target={rootRef} editor={showingEditor} revision={showingEditor ? draft : data?.content ?? ""} request={findRequest} onClose={() => {
+        setFindRequest(null);
+        findReturnFocus.current?.focus();
+      }} />}
       <div
         ref={bodyRef}
         className="file-view-body flex-1 min-h-0 overflow-auto bg-background"
@@ -916,7 +929,7 @@ export function FileViewer({
             />
           </MediaToolbarSlot.Provider>
         ) : isMarkdown && !showSource ? (
-          <div ref={selectableContentRef} className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
+          <div ref={selectableContentRef} data-file-search-content className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
               <ArtifactMarkdown
                 projectId={projectId}
@@ -954,7 +967,7 @@ export function FileViewer({
           />
         ) : (
           <>
-            <div ref={selectableContentRef}>
+            <div ref={selectableContentRef} data-file-search-content>
               <CodeView
                 text={data.content}
                 path={path}

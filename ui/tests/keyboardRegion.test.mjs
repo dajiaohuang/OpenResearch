@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { act } from "react";
 import { commandRegion, subscribeCommandRegion } from "../src/keyboardRegion.ts";
-import { navigate, renderApp, serveApp, settle } from "./render.mjs";
+import { m } from "../src/paraglide/messages.js";
+import { navigate, press, renderApp, serveApp, settle, type } from "./render.mjs";
 
 // The terminal tab's shell never connects.
 globalThis.WebSocket = class extends EventTarget { send() {} close() {} };
@@ -53,6 +54,7 @@ async function project(path) {
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
     "GET /api/projects/p/experiments": () => ({ experiments: [{ id: "exp", projectId: "p", slug: "exp", branchName: "b", runCommand: "", agentStatus: "", createdAt: 1, updatedAt: 1, archived: false }] }),
+    "GET /api/projects/p/file": () => ({ path: "paper.txt", content: "alpha beta alpha", root: "clone", notFound: false, binary: false, truncated: false, presentation: "text", version: "v1" }),
     "GET /api/chat/sessions": () => ({ sessions: [chat("s"), chat("side")] }),
   });
   await renderApp(path);
@@ -69,6 +71,27 @@ const closeTab = async () => {
   await act(async () => window.dispatchEvent(new CustomEvent("orx:command", { detail: "tab.close" })));
   await settle();
 };
+
+test("Mod+F in an open file searches that file", async () => {
+  await project(withPane({ kind: "file", path: "paper.txt" }));
+  await settle();
+  const editor = document.querySelector(".right-pane .file-view textarea");
+  assert.ok(editor);
+  await focus(editor);
+  await press("f", editor, { ctrlKey: true });
+  await act(async () => editor.dispatchEvent(new KeyboardEvent("keyup", { key: "f", ctrlKey: true, bubbles: true })));
+  await settle();
+  const input = document.querySelector(`.right-pane input[aria-label="${m.pdf_preview_find()}"]`);
+  assert.ok(input);
+  await type(input, "beta");
+  await press("Enter", input);
+  assert.equal(editor.value.slice(editor.selectionStart, editor.selectionEnd), "beta");
+  await press("f", editor, { ctrlKey: true });
+  assert.ok(document.activeElement === input, "the second shortcut refocuses file search");
+  await press("Escape", input);
+  assert.equal(document.querySelector(`.right-pane input[aria-label="${m.pdf_preview_find()}"]`), null);
+  assert.ok(document.activeElement === editor, "closing returns focus to the file");
+});
 
 for (const pane of [
   files, { kind: "home", view: "terminal" }, { kind: "home", view: "artifacts" }, { kind: "home", view: "experiments" },
