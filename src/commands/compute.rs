@@ -209,7 +209,7 @@ pub enum ComputeCommand {
 pub struct CatalogArgs {
     /// List CPU-only instance offers instead of the GPU catalog. CPU instances
     /// suit GPU-less experiments (data prep, eval harnesses, CPU-bound papers).
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["gpu", "count", "provider"])]
     pub cpu: bool,
     /// Filter to one GPU id (e.g. `H100_SXM`). Case-insensitive. GPU mode only.
     #[arg(long)]
@@ -828,6 +828,30 @@ impl Drop for EchoOff {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn catalog_rejects_gpu_filters_in_cpu_mode() {
+        for subcommand in [false, true] {
+            for (flag, value) in [("--gpu", "H100"), ("--count", "4"), ("--provider", "vast")] {
+                let mut args = vec!["orx", "compute"];
+                if subcommand {
+                    args.push("catalog");
+                }
+                args.extend(["--cpu", flag, value]);
+                assert!(crate::Cli::try_parse_from(args).is_err());
+            }
+            let mut cpu = vec!["orx", "compute"];
+            let mut gpu = vec!["orx", "compute"];
+            if subcommand {
+                cpu.push("catalog");
+                gpu.push("catalog");
+            }
+            cpu.push("--cpu");
+            gpu.extend(["--gpu", "H100", "--count", "4", "--provider", "vast"]);
+            assert!(crate::Cli::try_parse_from(cpu).is_ok());
+            assert!(crate::Cli::try_parse_from(gpu).is_ok());
+        }
+    }
 
     #[test]
     fn credential_entry_preserves_spaces_and_removes_only_the_submitted_newline() {
