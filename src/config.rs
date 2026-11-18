@@ -119,6 +119,19 @@ pub(crate) fn save_shared_instructions_at(
     expected: Option<&str>,
     content: &str,
 ) -> std::io::Result<bool> {
+    static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SAVE_LOCK
+        .lock()
+        .expect("shared instructions save lock poisoned");
+    let parent = path.parent().expect("instructions path has a parent");
+    std::fs::create_dir_all(parent)?;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(parent.join(".shared-instructions.lock"))?;
+    lock.lock()?;
+    let _file_lock = crate::file_lock::FileLock::new(lock);
     let current = match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -127,7 +140,6 @@ pub(crate) fn save_shared_instructions_at(
     if current.as_deref() != expected {
         return Ok(false);
     }
-    std::fs::create_dir_all(path.parent().expect("instructions path has a parent"))?;
     if current.is_none() {
         use std::io::Write;
         match std::fs::OpenOptions::new()
@@ -184,6 +196,86 @@ mod shared_instructions_tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "external");
         assert!(save_shared_instructions_at(&file, Some("external"), "draft").unwrap());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "draft");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn simultaneous_editors_cannot_both_save_the_same_version() {
+        let root = std::env::temp_dir().join(format!("orx-shared-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("AGENTS.md");
+        std::fs::write(&file, "original").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|text| {
+                let path = file.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (
+                        text,
+                        save_shared_instructions_at(&path, Some("original"), text).unwrap(),
+                    )
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(outcomes.iter().filter(|(_, saved)| *saved).count(), 1);
+        let winner = outcomes.iter().find(|(_, saved)| *saved).unwrap().0;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), winner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn separate_process_editors_cannot_both_save_the_same_version() {
+        use std::io::{BufRead, Write};
+        const FILE: &str = "ORX_SHARED_INSTRUCTIONS_RACE_FILE";
+        if let Some(file) = std::env::var_os(FILE) {
+            let mut start = String::new();
+            std::io::stdin().lock().read_line(&mut start).unwrap();
+            let saved = save_shared_instructions_at(
+                std::path::Path::new(&file),
+                Some("original"),
+                start.trim(),
+            )
+            .unwrap();
+            println!("SAVED={saved}");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("orx-shared-process-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("AGENTS.md");
+        std::fs::write(&file, "original").unwrap();
+        let mut children: Vec<_> = (0..2).map(|_| {
+            crate::process::command(std::env::current_exe().unwrap())
+                .args(["--exact", "config::shared_instructions_tests::separate_process_editors_cannot_both_save_the_same_version", "--nocapture"])
+                .env(FILE, &file)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn().unwrap()
+        }).collect();
+        for (child, text) in children.iter_mut().zip(["first", "second"]) {
+            writeln!(child.stdin.as_mut().unwrap(), "{text}").unwrap();
+        }
+        let results: Vec<_> = children
+            .into_iter()
+            .map(|child| child.wait_with_output().unwrap())
+            .collect();
+        assert!(results.iter().all(|output| output.status.success()));
+        assert_eq!(
+            results
+                .iter()
+                .filter(|output| String::from_utf8_lossy(&output.stdout).contains("SAVED=true"))
+                .count(),
+            1
+        );
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved == "first" || saved == "second");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
