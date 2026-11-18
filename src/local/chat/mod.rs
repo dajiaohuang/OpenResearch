@@ -3060,6 +3060,8 @@ pub struct ChatHost {
     /// prepared but has not reached atomic durable admission yet.
     pending_client_turns: std::sync::Mutex<HashMap<(String, String), PendingClientTurn>>,
     queue_dispatch_suppressed: std::sync::Mutex<HashSet<String>>,
+    /// A storage read failed before a queued message could be dispatched.
+    queue_refresh_errors: std::sync::Mutex<HashMap<String, String>>,
     /// Whether a project move may be waiting, so most turn ends skip the store.
     project_moves_waiting: std::sync::atomic::AtomicBool,
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
@@ -4024,6 +4026,7 @@ impl ChatHost {
             queue_persistence: std::sync::Mutex::new(()),
             pending_client_turns: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_suppressed: std::sync::Mutex::new(HashSet::new()),
+            queue_refresh_errors: std::sync::Mutex::new(HashMap::new()),
             // Until the first pass reads the store, a move from before a restart may wait.
             project_moves_waiting: std::sync::atomic::AtomicBool::new(true),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
@@ -4570,6 +4573,14 @@ impl ChatHost {
         if self.exiting.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
+        if self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key(session_id)
+        {
+            return false;
+        }
         let cancelled = self
             .queue_dispatch_cancelled
             .lock()
@@ -4590,6 +4601,14 @@ impl ChatHost {
     }
 
     fn claim_durable_turn(&self, session_id: &str) -> bool {
+        if self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key(session_id)
+        {
+            return false;
+        }
         // Serialize the shutdown check with stop_admitting's transition.
         let mut claims = self.durable_turns.lock().unwrap();
         if self.exiting.load(std::sync::atomic::Ordering::SeqCst) {
@@ -4610,11 +4629,32 @@ impl ChatHost {
         true
     }
 
-    fn release_durable_turn(&self, session_id: &str) {
-        let token = self.durable_turns.lock().unwrap().remove(session_id);
-        if let (Some(token), Ok(store)) = (token, Store::open()) {
-            let _ = store.release_chat_turn(session_id, &token);
+    fn release_durable_turn(&self, session_id: &str) -> Result<()> {
+        let preserve = self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key(session_id);
+        let mut claims = self.durable_turns.lock().unwrap();
+        if let Some(token) = claims.get(session_id) {
+            let result = Store::open().and_then(|store| store.release_chat_turn(session_id, token));
+            if result.is_ok() || !preserve {
+                claims.remove(session_id);
+            }
+            result?;
         }
+        Ok(())
+    }
+
+    fn release_refresh_claim_if_idle(&self, session_id: &str) -> Result<()> {
+        let turns = self
+            .turns
+            .try_lock()
+            .map_err(|_| anyhow!("The chat is still finishing; try again."))?;
+        if turns.contains_key(session_id) {
+            return Err(anyhow!("The chat is still finishing; try again."));
+        }
+        self.release_durable_turn(session_id)
     }
 
     pub(crate) fn fence_copy_publication(
@@ -4688,6 +4728,12 @@ impl ChatHost {
     /// Parked messages in run order, then steers the running turn's agent has
     /// not read yet (`dispatchState: "steering"`).
     pub fn queued_items(&self, session_id: &str) -> Vec<Value> {
+        let refresh_error = self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned();
         let mut items: Vec<Value> = self
             .queued
             .lock()
@@ -4714,6 +4760,11 @@ impl ChatHost {
                     .collect()
             })
             .unwrap_or_default();
+        if let (Some(error), Some(first)) = (refresh_error, items.first_mut()) {
+            first["dispatchState"] = json!("blocked");
+            first["nextRetryAt"] = Value::Null;
+            first["error"] = json!(error);
+        }
         if let Some(steers) = self.pending_steers.lock().unwrap().get(session_id) {
             items.extend(steers.iter().map(|steer| {
                 json!({
@@ -4802,6 +4853,11 @@ impl ChatHost {
             .filter_map(|(session_id, next_retry_at, exhausted)| {
                 if exhausted
                     || self
+                        .queue_refresh_errors
+                        .lock()
+                        .unwrap()
+                        .contains_key(&session_id)
+                    || self
                         .queue_dispatch_cancelled
                         .lock()
                         .unwrap()
@@ -4828,6 +4884,11 @@ impl ChatHost {
                     let mut turns = host.turns.lock().await;
                     if host.deleting_sessions.lock().unwrap().contains(&session_id)
                         || turns.contains_key(&session_id)
+                        || host
+                            .queue_refresh_errors
+                            .lock()
+                            .unwrap()
+                            .contains_key(&session_id)
                         || !host.claim_durable_turn(&session_id)
                     {
                         false
@@ -5068,6 +5129,14 @@ impl ChatHost {
     /// empty `chat.queued` only if there was something to clear.
     pub fn clear_queue(&self, session_id: &str) -> Result<()> {
         let _mutation = self.queue_persistence.lock().unwrap();
+        if self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key(session_id)
+        {
+            self.release_refresh_claim_if_idle(session_id)?;
+        }
         self.queue_dispatch_cancelled
             .lock()
             .unwrap()
@@ -5104,6 +5173,7 @@ impl ChatHost {
             .unwrap()
             .remove(session_id)
             .is_some_and(|q| !q.is_empty());
+        self.queue_refresh_errors.lock().unwrap().remove(session_id);
         if had || had_steers {
             self.emit_queued(session_id);
         }
@@ -5124,6 +5194,14 @@ impl ChatHost {
     /// Remove one parked message by id (the ✕ on a queued chip).
     pub fn cancel_queued(self: &Arc<Self>, session_id: &str, item_id: &str) -> Result<bool> {
         let _mutation = self.queue_persistence.lock().unwrap();
+        if self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key(session_id)
+        {
+            self.release_refresh_claim_if_idle(session_id)?;
+        }
         let store = Store::open()?;
         let (removed, exhausted_head) = {
             let mut map = self.queued.lock().unwrap();
@@ -5146,6 +5224,9 @@ impl ChatHost {
                 .is_some_and(queued_delivery_exhausted);
             (removed, exhausted_head)
         };
+        if !self.queued.lock().unwrap().contains_key(session_id) {
+            self.queue_refresh_errors.lock().unwrap().remove(session_id);
+        }
         if removed
             && !self
                 .queue_dispatch_in_flight
@@ -5190,6 +5271,37 @@ impl ChatHost {
             return Ok(false);
         }
         let store = Store::open()?;
+        if self
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key(session_id)
+        {
+            let requested_front = self
+                .queued
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .and_then(|queue| queue.front())
+                .is_some_and(|message| message.id == item_id);
+            if !requested_front {
+                return Ok(false);
+            }
+            self.release_refresh_claim_if_idle(session_id)?;
+            self.refresh_persisted_queue_locked(session_id, &store)?;
+            self.queue_refresh_errors.lock().unwrap().remove(session_id);
+            let is_front = self
+                .queued
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .and_then(|queue| queue.front())
+                .is_some_and(|message| message.id == item_id);
+            drop(_mutation);
+            self.emit_queued(session_id);
+            self.resume_persisted_queues();
+            return Ok(is_front);
+        }
         let harness = store
             .get_chat_session(session_id)
             .ok()
@@ -5219,6 +5331,7 @@ impl ChatHost {
             .lock()
             .unwrap()
             .remove(session_id);
+        self.queue_refresh_errors.lock().unwrap().remove(session_id);
         drop(_mutation);
         self.emit_queued(session_id);
         crate::telemetry::capture(
@@ -5259,7 +5372,39 @@ impl ChatHost {
                 );
             }
             let mut guard = TurnGuard::adopt(self, session_id);
-            if self.refresh_persisted_queue(session_id).is_err() {
+            let blocked = self
+                .queue_refresh_errors
+                .lock()
+                .unwrap()
+                .contains_key(session_id);
+            if blocked {
+                guard.release().await;
+                return;
+            }
+            let refreshed = {
+                let _mutation = self.queue_persistence.lock().unwrap();
+                let result = Store::open()
+                    .and_then(|store| self.refresh_persisted_queue_locked(session_id, &store));
+                if let Err(error) = &result {
+                    let mut message = format!("Could not read the queued messages: {error}");
+                    cap_tool_text(&mut message);
+                    if self
+                        .queued
+                        .lock()
+                        .unwrap()
+                        .get(session_id)
+                        .is_some_and(|queue| !queue.is_empty())
+                    {
+                        self.queue_refresh_errors
+                            .lock()
+                            .unwrap()
+                            .insert(session_id.to_string(), message);
+                    }
+                }
+                result
+            };
+            if refreshed.is_err() {
+                self.emit_queued(session_id);
                 guard.release().await;
                 return;
             }
@@ -5473,6 +5618,11 @@ impl ChatHost {
                                 let mut turns = host.turns.lock().await;
                                 if host.deleting_sessions.lock().unwrap().contains(&session_id)
                                     || turns.contains_key(&session_id)
+                                    || host
+                                        .queue_refresh_errors
+                                        .lock()
+                                        .unwrap()
+                                        .contains_key(&session_id)
                                     || !host.claim_durable_turn(&session_id)
                                 {
                                     false
@@ -6540,6 +6690,16 @@ impl ChatHost {
                     return Ok(TurnSubmission::Queued(client_turn_id));
                 }
                 if !self.claim_durable_turn(session_id) {
+                    if self
+                        .queue_refresh_errors
+                        .lock()
+                        .unwrap()
+                        .contains_key(session_id)
+                    {
+                        return Err(anyhow!(
+                            "Queued messages could not be read. Retry the blocked message first."
+                        ));
+                    }
                     return Err(anyhow!("session is busy in another `orx up` process"));
                 }
                 turns.insert(
@@ -7294,7 +7454,9 @@ impl ChatHost {
                 );
             }
             SlotHolder::None => {
-                self.release_durable_turn(session_id);
+                if let Err(error) = self.release_durable_turn(session_id) {
+                    eprintln!("orx up: could not release chat lease for {session_id}: {error}");
+                }
                 turns.remove(session_id);
             }
         }
@@ -13557,6 +13719,93 @@ mod run_wakeup_tests {
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
         ))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_refresh_failure_keeps_message_and_lease_until_storage_recovers() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        store
+            .create_local_project(&crate::store::tests::local_project_fixture("p1"))
+            .unwrap();
+        session(&store, "owner");
+        let host = notice_host();
+        let mut copy = TurnGuard::claim_idle_for_copy(&host, "owner")
+            .await
+            .unwrap();
+        let queued = host
+            .send_message(
+                "owner",
+                "keep this".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_refresh_failure".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(queued.queued);
+        let item_id = host.queued_items("owner")[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let old_data_dir = std::env::var_os("ORX_DATA_DIR");
+        let unavailable = crate::config::test_home().join("not-a-directory");
+        std::fs::write(&unavailable, b"fixture").unwrap();
+        std::env::set_var("ORX_DATA_DIR", &unavailable);
+        copy.release().await;
+        assert!(!host.is_busy("owner").await);
+        let blocked = host.queued_items("owner");
+        assert_eq!(blocked[0]["dispatchState"], "blocked");
+        assert!(blocked[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Could not read"));
+        assert!(host.durable_turns.lock().unwrap().contains_key("owner"));
+        assert!(store.chat_turn_leased("owner").unwrap());
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(host.retry_queued("owner", &item_id).is_err());
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        // A drain scheduled before the failure must not bypass the block.
+        host.turns
+            .lock()
+            .await
+            .insert("owner".into(), TurnState::Draining);
+        host.drain_queue("owner").await;
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        assert!(store.chat_turn_leased("owner").unwrap());
+        match old_data_dir {
+            Some(value) => std::env::set_var("ORX_DATA_DIR", value),
+            None => std::env::remove_var("ORX_DATA_DIR"),
+        }
+        host.refresh_persisted_queue("owner").unwrap();
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        assert!(TurnGuard::claim_idle_for_copy(&host, "owner")
+            .await
+            .is_none());
+        assert!(!host.retry_queued("owner", "wrong-id").unwrap());
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        assert!(host.retry_queued("owner", &item_id).unwrap());
+        // Keep this test focused on recovery, without launching an agent.
+        host.stop_admitting();
+        assert!(!store.chat_turn_leased("owner").unwrap());
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "queued");
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
