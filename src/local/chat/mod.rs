@@ -4557,15 +4557,28 @@ impl ChatHost {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Give up every turn lease this process holds, so the next start recovers its turns at once.
+    /// Give up held turn leases; retain failures for another attempt while this host lives.
     pub fn release_turn_leases(&self) {
-        let claims = std::mem::take(&mut *self.durable_turns.lock().unwrap());
-        let Ok(store) = Store::open() else {
+        let mut claims = self.durable_turns.lock().unwrap();
+        if claims.is_empty() {
             return;
-        };
-        for (session_id, token) in claims {
-            let _ = store.release_chat_turn(&session_id, &token);
         }
+        let store = match Store::open() {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("orx up: could not release chat leases during shutdown: {error}");
+                return;
+            }
+        };
+        claims.retain(
+            |session_id, token| match store.release_chat_turn(session_id, token) {
+                Ok(()) => false,
+                Err(error) => {
+                    eprintln!("orx up: could not release chat lease for {session_id}: {error}");
+                    true
+                }
+            },
+        );
     }
 
     /// Whether the turn ending in `session_id` hands its slot to the next queued message.
@@ -13984,11 +13997,14 @@ mod run_wakeup_tests {
         std::env::set_var("ORX_DATA_DIR", &unavailable);
         copy.release().await;
         assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        host.stop_admitting();
+        host.release_turn_leases();
+        assert!(host.durable_turns.lock().unwrap().contains_key("owner"));
+        assert!(store.chat_turn_leased("owner").unwrap());
         match old_data_dir {
             Some(value) => std::env::set_var("ORX_DATA_DIR", value),
             None => std::env::remove_var("ORX_DATA_DIR"),
         }
-        host.stop_admitting();
         host.release_turn_leases();
         assert!(!store.chat_turn_leased("owner").unwrap());
         let restarted = notice_host();
@@ -14003,6 +14019,69 @@ mod run_wakeup_tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn outage_through_shutdown_recovers_queue_after_lease_expires() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        store
+            .create_local_project(&crate::store::tests::local_project_fixture("p1"))
+            .unwrap();
+        session(&store, "owner");
+        let host = notice_host();
+        let mut copy = TurnGuard::claim_idle_for_copy(&host, "owner")
+            .await
+            .unwrap();
+        assert!(
+            host.send_message(
+                "owner",
+                "survive outage".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_outage".into()),
+                None
+            )
+            .await
+            .unwrap()
+            .queued
+        );
+        let old_data_dir = std::env::var_os("ORX_DATA_DIR");
+        let unavailable = crate::config::test_home().join("not-a-directory");
+        std::fs::write(&unavailable, b"fixture").unwrap();
+        std::env::set_var("ORX_DATA_DIR", &unavailable);
+        copy.release().await;
+        host.stop_admitting();
+        host.release_turn_leases();
+        assert!(host.durable_turns.lock().unwrap().contains_key("owner"));
+        drop(copy);
+        drop(host);
+        match old_data_dir {
+            Some(value) => std::env::set_var("ORX_DATA_DIR", value),
+            None => std::env::remove_var("ORX_DATA_DIR"),
+        }
+        let restarted = notice_host();
+        assert_eq!(restarted.queued_items("owner")[0]["text"], "survive outage");
+        assert!(!store.claim_chat_turn("owner", "successor", &[]).unwrap());
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_turn_leases SET heartbeat_at = 0 WHERE chat_session_id = ?1",
+            ["owner"],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert!(store.claim_chat_turn("owner", "successor", &[]).unwrap());
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+        store.release_chat_turn("owner", "successor").unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
