@@ -4501,6 +4501,7 @@ struct FileLocationReq {
     source: String,
     session_id: Option<String>,
     root: Option<String>,
+    expected_path: Option<String>,
 }
 
 async fn file_location(
@@ -4569,6 +4570,11 @@ async fn resolve_file_location(
         };
         if !full.is_file() {
             return Err(bad_request("file is unavailable"));
+        }
+        if let Some(expected) = req.expected_path.as_deref() {
+            if full != std::path::Path::new(expected) {
+                return Err(bad_request("file location changed; reopen the menu"));
+            }
         }
         if reveal {
             crate::editors::reveal_in_file_manager(&full)
@@ -13066,6 +13072,7 @@ mod tests {
             source: "checkout".into(),
             session_id: None,
             root: Some(root.into()),
+            expected_path: None,
         };
         let result = file_location(
             State(test_state()),
@@ -13102,6 +13109,13 @@ mod tests {
         )
         .await
         .is_err());
+        let mut changed = request("report.md", "clone");
+        changed.expected_path = Some(dir.join("other.md").to_string_lossy().into_owned());
+        assert!(
+            file_location(State(test_state()), Path(project.id.clone()), Json(changed))
+                .await
+                .is_err()
+        );
         let artifacts = local::files::ensure_dir(&project).unwrap();
         std::fs::write(artifacts.join("output.txt"), b"artifact").unwrap();
         let artifact = FileLocationReq {
@@ -13109,6 +13123,7 @@ mod tests {
             source: "artifact".into(),
             session_id: None,
             root: None,
+            expected_path: None,
         };
         let result = file_location(
             State(test_state()),
@@ -13129,6 +13144,7 @@ mod tests {
             source: "branch".into(),
             session_id: None,
             root: None,
+            expected_path: None,
         };
         assert!(
             file_location(State(test_state()), Path(project.id), Json(historical))

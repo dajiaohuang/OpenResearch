@@ -2870,7 +2870,7 @@ export function createApi(
   const revealArtifactInManager = (projectId: string, path: string) =>
     post<{ ok: boolean }>(`/api/projects/${projectId}/files/reveal`, { path });
 
-  const fileLocation = (projectId: string, body: { path: string; source: "checkout" | "artifact" | "absolute"; sessionId?: string; root?: string }, reveal = false) =>
+  const fileLocation = (projectId: string, body: { path: string; source: "checkout" | "artifact" | "absolute"; sessionId?: string; root?: string; expectedPath?: string }, reveal = false) =>
     post<{ path: string }>(`/api/projects/${projectId}/file/location${reveal ? "/reveal" : ""}`, body);
 
   /** Text-safe body of an artifact, or `null` when the file is missing. */

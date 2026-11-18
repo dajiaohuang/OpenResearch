@@ -28,18 +28,19 @@ export type OpenFile = (
 /** The checkout a chat's file references are checked against. */
 export const FileScopeContext = createContext<{ projectId: string; sessionId?: string | null } | undefined>(undefined);
 
-export function FileChip({ path, line, exp, onOpenFile }: {
+export function FileChip({ path, line, exp, onOpenFile, children }: {
   path: string;
   line?: number;
   /** Experiment id this file was cited from, if any (`<file exp=…>`). */
   exp?: string;
   onOpenFile?: OpenFile;
+  children?: ReactNode;
 }) {
   const workspace = useWorkspace();
   const scope = useContext(FileScopeContext);
   const runtime = useContext(RuntimeContext);
   const [menu, setMenu] = useState<FileContextMenuTarget | null>(null);
-  const [location, setLocation] = useState<{ path: string; source: "checkout" | "artifact" | "absolute"; sessionId?: string; root?: string } | null>(null);
+  const [location, setLocation] = useState<{ path: string; source: "checkout" | "artifact" | "absolute"; sessionId?: string; root?: string; expectedPath: string } | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const sequence = useRef(0);
   const name = path.split("/").pop() || path;
@@ -60,8 +61,10 @@ export function FileChip({ path, line, exp, onOpenFile }: {
       if (exp && (tab.source == null || tab.source === "repo")) throw new Error(m.file_tree_location_historical());
       const loaded = await workspace.queryClient.fetchQuery({ ...workspace.queries.resolvedFileQuery(scope.projectId, tab.path, tab.source ?? "repo", tab.sessionId, tab.ref), staleTime: 0 });
       if (loaded.file.notFound || (loaded.source === "checkout" && loaded.file.root === "branch")) throw new Error(m.file_tree_location_unavailable());
+      const selected = { path: loaded.file.path, source: loaded.source, ...(tab.sessionId ? { sessionId: tab.sessionId } : {}), ...(loaded.source === "checkout" ? { root: loaded.file.root } : {}) };
+      const current = await workspace.api.fileLocation(scope.projectId, selected);
       if (request !== sequence.current) return;
-      setLocation({ path: loaded.file.path, source: loaded.source, ...(tab.sessionId ? { sessionId: tab.sessionId } : {}), ...(loaded.source === "checkout" ? { root: loaded.file.root } : {}) });
+      setLocation({ ...selected, expectedPath: current.path });
     })().catch((error: unknown) => { if (request === sequence.current) setNote(error instanceof Error ? error.message : String(error)); });
   };
   const action = async (reveal: boolean) => {
@@ -84,8 +87,7 @@ export function FileChip({ path, line, exp, onOpenFile }: {
       disabled={!onOpenFile}
       onContextMenu={openMenu}
     >
-      <FileCode size={12} />
-      <span className="file-chip-label">{label}</span>
+      {children ?? <><FileCode size={12} /><span className="file-chip-label">{label}</span></>}
     </button>
     {menu && <FileContextMenu target={menu} onOpen={() => onOpenFile?.(path, line, exp, undefined, "preview")}
       onCopyPath={location ? () => void action(false) : undefined}

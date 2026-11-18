@@ -512,10 +512,9 @@ export const Md = memo(function Md({
       if (figure && onOpenFile) {
         const localPath = figure.source === "artifact" ? `artifacts/${figure.path}` : figure.path;
         const path = resolveFilePath ? resolveFilePath(encodeMarkdownPath(localPath)) : localPath;
-        if (path) return <button type="button" className="file-link cursor-pointer text-start"
-          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenFile(path, undefined, undefined, undefined, intent))}>
+        if (path) return <FileChip path={path} onOpenFile={onOpenFile}>
           {children}
-        </button>;
+        </FileChip>;
       }
       // Agents sometimes link files as plain markdown links; open those as
       // file tabs instead of navigating the dashboard away.
