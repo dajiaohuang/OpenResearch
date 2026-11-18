@@ -507,6 +507,7 @@ export function TreeView({
   const [flowReady, setFlowReady] = useState(false);
   const [nodesMeasured, setNodesMeasured] = useState(false);
   useLayoutEffect(() => { setSearch(""); setStatus("all"); setFlowReady(false); setNodesMeasured(false); }, [project.id, agentSessionId]);
+  const filterActive = search.trim() !== "" || status !== "all";
   const { nodes, edges } = useMemo(() => {
     const runsByExp = new Map<string, Run[]>();
     for (const run of runs) {
@@ -521,7 +522,7 @@ export function TreeView({
     const isMine = (n: TreeNode) =>
       !agentSessionId || n.exp.chatSessionId === agentSessionId;
     const scopedRoots = elideHiddenRegions(buildForest(experiments), isMine);
-    const roots = showArchived ? scopedRoots : collapseArchivedRegions(scopedRoots);
+    const roots = showArchived || filterActive ? scopedRoots : collapseArchivedRegions(scopedRoots);
     const slugById = new Map(experiments.map((e) => [e.id, e.slug]));
 
     function layout(node: DisplayNode, cx: number, y: number) {
@@ -594,6 +595,7 @@ export function TreeView({
     experiments,
     archiveActions,
     showArchived,
+    filterActive,
     runs,
     onOpenView,
     onOpenCode,
@@ -607,7 +609,6 @@ export function TreeView({
     onRestoreRegion,
   ]);
 
-  const filterActive = search.trim() !== "" || status !== "all";
   const matches = useMemo(() => graphMatches(nodes.flatMap((node) => node.type === "exp" ? [{
     id: node.id, title: node.data.exp.title ?? "", slug: node.data.exp.slug,
     status: node.data.latestRun?.status ?? null,

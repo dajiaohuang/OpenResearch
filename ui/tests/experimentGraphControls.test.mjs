@@ -8,11 +8,11 @@ import { render, serve, settle, type } from "./render.mjs";
 test("search and status controls show matches and clear their state", async () => {
   serve(() => ({}));
   const experiment = (id, parent = null) => ({ id, projectId: "p", slug: id, title: id, parentExperimentId: parent, branchName: id, createdAt: 1, archived: false });
-  const experiments = [experiment("root"), experiment("match", "root"), experiment("other", "root")];
+  const experiments = [experiment("root"), experiment("match", "root"), experiment("other", "root"), { ...experiment("archived", "root"), archived: true }];
   const noop = () => {};
   const moves = [];
   const props = {
-    experiments, archiveActions: new Map(experiments.map((e) => [e.id, {}])), showArchived: true,
+    experiments, archiveActions: new Map(experiments.map((e) => [e.id, {}])), showArchived: false,
     runs: [], project: { id: "p" }, onOpenView: noop, onOpenCode: noop, onArchive: noop, onDelete: noop,
     agentSessionId: null, onShowProjectScope: noop, onRestoreRegion: noop, viewport: null, onViewportChange: (value) => moves.push(value),
   };
@@ -26,6 +26,9 @@ test("search and status controls show matches and clear their state", async () =
   await settle();
   const results = container.querySelector(`[role="region"][aria-label="${m.tree_search_graph()}"]`);
   assert.ok(results.textContent.includes("match (match)"));
+  await type(input, "archived");
+  assert.ok(results.textContent.includes("archived (archived)"), "search finds an archived experiment without changing the saved archive preference");
+  await type(input, "match");
   const status = container.querySelector(`select[aria-label="${m.settings_page_status()}"]`);
   const canvas = container.querySelector(`[aria-label="${m.tree_canvas_controls()}"]`);
   const inputArrow = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
