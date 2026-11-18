@@ -1,4 +1,7 @@
 {
+  "file_tree_location_preview_unverified": "Hãy đóng bản xem trước để dùng vị trí tệp; không thể xác minh nguồn đang hiển thị.",
+  "file_tree_location_unavailable": "Không thể xác định vị trí tệp. Hãy mở lại tệp và thử lại.",
+  "file_tree_location_historical": "Tham chiếu này là phiên bản lịch sử và không có vị trí trên đĩa được xác minh.",
   "workspace_active_experiments": "Các thí nghiệm đang hoạt động",
   "files_empty_description": "Các tệp trong không gian làm việc này sẽ xuất hiện ở đây. Yêu cầu agent tạo một tệp để bắt đầu.",
   "experiments_empty_description": "Các thí nghiệm và lượt chạy của chúng sẽ xuất hiện ở đây. Yêu cầu agent thiết lập thí nghiệm để bắt đầu.",
