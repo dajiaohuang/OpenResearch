@@ -7006,13 +7006,35 @@ impl ChatHost {
                     delivery: DeliveryState::NotSent,
                 }),
                 Ok(_) => {
-                    match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id) {
-                        Some(harness) => harness.run_turn(&mut ctx).await,
-                        None => Err(crate::local::harness::TurnFailure {
-                            kind: "unknown_harness",
-                            message: format!("unknown agent: {}", ctx.harness),
-                            delivery: DeliveryState::Rejected,
+                    let instructions = if ctx.continuation {
+                        Ok(None)
+                    } else {
+                        crate::config::shared_instructions()
+                    };
+                    match instructions {
+                        Err(error) => Err(crate::local::harness::TurnFailure {
+                            kind: "shared_instructions_unavailable",
+                            message: format!(
+                                "Could not read shared OpenResearch instructions: {error}"
+                            ),
+                            delivery: DeliveryState::NotSent,
                         }),
+                        Ok(instructions) => {
+                            if let Some(instructions) = instructions {
+                                ctx.text = format!("<openresearch-instructions>\n{instructions}\n</openresearch-instructions>\n\n{}", ctx.text);
+                            }
+                            match crate::local::harness::session_harness(
+                                &ctx.harness,
+                                &ctx.session_id,
+                            ) {
+                                Some(harness) => harness.run_turn(&mut ctx).await,
+                                None => Err(crate::local::harness::TurnFailure {
+                                    kind: "unknown_harness",
+                                    message: format!("unknown agent: {}", ctx.harness),
+                                    delivery: DeliveryState::Rejected,
+                                }),
+                            }
+                        }
                     }
                 }
             };

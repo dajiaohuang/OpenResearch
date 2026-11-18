@@ -97,6 +97,49 @@ pub(crate) fn config_dir() -> PathBuf {
     base.join("openresearch")
 }
 
+/// Read the current shared instructions without creating the configuration file.
+pub(crate) fn shared_instructions() -> std::io::Result<Option<String>> {
+    shared_instructions_at(&config_dir().join("AGENTS.md"))
+}
+
+fn shared_instructions_at(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => Ok(None),
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod shared_instructions_tests {
+    use super::*;
+
+    #[test]
+    fn reads_fresh_content_and_distinguishes_invalid_input() {
+        let root =
+            std::env::temp_dir().join(format!("orx-shared-instructions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("AGENTS.md");
+        assert!(shared_instructions_at(&file).unwrap().is_none());
+        std::fs::write(&file, " \n").unwrap();
+        assert!(shared_instructions_at(&file).unwrap().is_none());
+        std::fs::write(&file, "First").unwrap();
+        assert_eq!(
+            shared_instructions_at(&file).unwrap().as_deref(),
+            Some("First")
+        );
+        std::fs::write(&file, "Second").unwrap();
+        assert_eq!(
+            shared_instructions_at(&file).unwrap().as_deref(),
+            Some("Second")
+        );
+        std::fs::write(&file, [0xff]).unwrap();
+        assert!(shared_instructions_at(&file).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 pub(crate) use user_dirs::*;
 
 /// The user's directories. Callers go through these, never `dirs`, so that
