@@ -228,6 +228,18 @@ pub(crate) fn publish_checkout_file_fenced(
         return Err(anyhow!("cannot publish files under .git"));
     }
     let source = resolve_contained(checkout, rel_path)?;
+    let checkout_root = crate::paths::canonicalize(checkout)?;
+    if source
+        .strip_prefix(&checkout_root)?
+        .components()
+        .any(|part| {
+            part.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(".git")
+        })
+    {
+        return Err(anyhow!("cannot publish files under .git"));
+    }
     let name = Path::new(rel_path)
         .file_name()
         .ok_or_else(|| anyhow!("invalid file name"))?;
@@ -562,6 +574,34 @@ mod publish_tests {
             .file_name()
             .to_string_lossy()
             .starts_with(".orx-publish-")));
+        std::fs::remove_dir(&junction).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publish_rejects_junction_into_git_directory() {
+        let root = std::env::temp_dir().join(format!("orx-publish-git-{}", uuid::Uuid::new_v4()));
+        let checkout = root.join("checkout");
+        let git = checkout.join(".git");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(git.join("config"), b"metadata").unwrap();
+        let junction = checkout.join("alias");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&git)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(publish_checkout_file(&checkout, "alias", &artifacts).is_err());
+        assert!(!artifacts.join("alias").exists());
         std::fs::remove_dir(&junction).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }
