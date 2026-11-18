@@ -4590,10 +4590,11 @@ impl ChatHost {
     }
 
     fn claim_durable_turn(&self, session_id: &str) -> bool {
+        // Serialize the shutdown check with stop_admitting's transition.
+        let mut claims = self.durable_turns.lock().unwrap();
         if self.exiting.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
-        let mut claims = self.durable_turns.lock().unwrap();
         if claims.contains_key(session_id) {
             return false;
         }
