@@ -465,6 +465,9 @@ mod tests {
                 "αοσ".to_string(),
                 format!("{prefix} αοσ"),
                 format!("{prefix} {prefix} αοσ"),
+                format!(
+                    "{prefix} alp bet gam del eps zet the iot kap lam sig ome pri sol lun com αοσ"
+                ),
                 "αοσ xy".to_string(),
                 format!("{prefix} αοσ xy"),
             ] {
