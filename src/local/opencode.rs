@@ -453,6 +453,16 @@ struct AgentChild {
     uploaded_skills_snapshot: Option<[u8; 32]>,
 }
 
+fn uploaded_skills_snapshot(worktree: &Path) -> Option<[u8; 32]> {
+    match super::user_skills::session_uploads_snapshot(worktree, ".opencode/skills") {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            eprintln!("orx up: could not check uploaded skill freshness: {error}");
+            None
+        }
+    }
+}
+
 impl AgentChild {
     fn status(&self) -> AgentStatus {
         AgentStatus {
@@ -461,7 +471,7 @@ impl AgentChild {
             project_id: Some(self.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.model.clone(),
-            uploaded_skills_stale: false,
+            uploaded_skills_stale: self.uploaded_skills_snapshot.is_none(),
         }
     }
 }
@@ -488,8 +498,7 @@ async fn spawn_agent(
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
     };
-    let uploaded_skills_snapshot =
-        super::user_skills::session_uploads_snapshot(&repo, ".opencode/skills")?;
+    let uploaded_skills_snapshot = uploaded_skills_snapshot(&repo);
     // Best-effort: the playbook is the real guide; the shim just lets
     // opencode's skill tool surface `orx skill` too.
     if let Err(err) = crate::commands::install_skills::install_opencode_shim().await {
@@ -540,7 +549,7 @@ async fn spawn_agent(
         binary,
         endpoint,
         database,
-        uploaded_skills_snapshot: Some(uploaded_skills_snapshot),
+        uploaded_skills_snapshot,
     })
 }
 
@@ -976,11 +985,10 @@ impl AgentHost {
                     let loaded_snapshot = agent.uploaded_skills_snapshot;
                     drop(guard);
                     let worktree = git::existing_session_worktree_path(project, session_id);
-                    let current_snapshot = super::user_skills::session_uploads_snapshot(
-                        &worktree,
-                        ".opencode/skills",
-                    )?;
-                    status.uploaded_skills_stale = loaded_snapshot != Some(current_snapshot)
+                    let current_snapshot = uploaded_skills_snapshot(&worktree);
+                    status.uploaded_skills_stale = loaded_snapshot.is_none()
+                        || current_snapshot.is_none()
+                        || loaded_snapshot != current_snapshot
                         || super::user_skills::session_uploads_stale(&worktree, ".opencode/skills");
                     if let Some(model) = model {
                         verify_generation_models(&endpoint, model).await?;
@@ -1116,6 +1124,16 @@ impl AgentHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_skill_snapshot_is_reported_as_unknown() {
+        let fixture = git::TemporaryDirectory::new("orx-skill-snapshot").unwrap();
+        let skills = fixture.path().join(".opencode/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        assert!(uploaded_skills_snapshot(fixture.path()).is_some());
+        std::fs::write(skills.join(".orx-user-skills"), [0xff]).unwrap();
+        assert!(uploaded_skills_snapshot(fixture.path()).is_none());
+    }
     use crate::local::agent_text::sample_project;
 
     #[test]
