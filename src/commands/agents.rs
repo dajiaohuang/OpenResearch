@@ -336,14 +336,19 @@ pub(crate) async fn add_endpoint(
         .map(|(id, _)| id)
         .ok_or_else(|| {
             anyhow!(
-                "The dashboard did not say which endpoint it added. Run `orx agents` to find it."
+                "The dashboard accepted the endpoint, but did not say which one it saved. Run `orx agents` to inspect it."
             )
         })?;
     let key = format!("opencode:{id}");
-    match logo {
+    let result = match logo {
         Some(logo) => label(dashboard, &key, json!({"logo": logo})).await,
         None => find(dashboard, &key).await,
-    }
+    };
+    result.map_err(|error| {
+        anyhow!(
+            "The endpoint `{key}` was saved, but its details or logo could not be confirmed: {error}. Run `orx agents` to inspect it."
+        )
+    })
 }
 
 fn show(row: &Value, json: bool) -> Result<()> {
@@ -378,4 +383,42 @@ fn print_rows(rows: &[Value]) {
         })
         .collect();
     print_table(&["KEY", "KIND", "ON", "NAME", "LOGO", "DETAIL"], &table);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{http::StatusCode, routing::post, Json, Router};
+
+    #[tokio::test]
+    async fn endpoint_save_is_reported_when_logo_update_fails() {
+        let app = Router::new()
+            .route(
+                "/api/local-models",
+                post(|| async { Json(json!({"model": "test-endpoint/model", "created": true})) }),
+            )
+            .route(
+                "/api/agents/{key}",
+                axum::routing::patch(|| async {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": "logo unavailable"})),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dashboard = Dashboard::new(port, None).unwrap();
+
+        let error = add_endpoint(&dashboard, json!({}), Some("openai".into()))
+            .await
+            .unwrap_err()
+            .to_string();
+        server.abort();
+        assert!(error.contains("opencode:test-endpoint"), "{error}");
+        assert!(error.contains("was saved"), "{error}");
+        assert!(error.contains("logo unavailable"), "{error}");
+        assert!(error.contains("orx agents"), "{error}");
+    }
 }
