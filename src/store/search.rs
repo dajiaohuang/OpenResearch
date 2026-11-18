@@ -53,12 +53,7 @@ impl SearchRequest {
             return Err(anyhow!("Search is limited to 256 characters."));
         }
         // FTS5 folds case itself; lowercasing first breaks letters like `İ` that Rust and FTS5 fold differently.
-        let terms: Vec<_> = self
-            .q
-            .split_whitespace()
-            .take(16)
-            .map(str::to_owned)
-            .collect();
+        let terms: Vec<_> = self.q.split_whitespace().map(str::to_owned).collect();
         let filter = match self.scope {
             SearchScope::Chat => SearchFilter::Chat(
                 self.session_id
@@ -201,11 +196,21 @@ impl Store {
             return Ok(page);
         }
         let lowered: Vec<_> = query.terms.iter().map(|term| term.to_lowercase()).collect();
-        let indexed_terms: Vec<_> = query
-            .terms
-            .iter()
-            .filter(|term| term.chars().count() >= 3)
-            .collect();
+        let mut indexed_terms = Vec::new();
+        let mut residual_terms = Vec::new();
+        for term in &query.terms {
+            if term.chars().count() >= 3 && indexed_terms.len() < 16 {
+                indexed_terms.push(term);
+            } else {
+                residual_terms.push(term.to_lowercase());
+            }
+        }
+        // Keep existing mixed-length matching while checking terms beyond the FTS bound.
+        let check_terms = if query.terms.iter().any(|term| term.chars().count() < 3) {
+            &lowered
+        } else {
+            &residual_terms
+        };
         let scan = indexed_terms.is_empty();
         if scan && !matches!(query.filter, SearchFilter::Chat(_)) {
             page.requires_longer_query = true;
@@ -308,9 +313,9 @@ impl Store {
                     .map(|part| part.0.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if scan || indexed_terms.len() != query.terms.len() {
+                if !check_terms.is_empty() {
                     let lower = text.to_lowercase();
-                    if !lowered.iter().all(|term| lower.contains(term)) {
+                    if !check_terms.iter().all(|term| lower.contains(term)) {
                         continue;
                     }
                 }
@@ -447,6 +452,59 @@ mod tests {
             limit: Some(2),
             cursor: None,
         }
+    }
+
+    #[test]
+    fn every_query_word_must_match_beyond_the_indexed_limit() {
+        with_store(|store| {
+            session(&store, "chat", "project");
+            let present = "alpha beta gamma delta epsilon zeta theta iota kappa lambda sigma omega prime solar lunar comet";
+            store
+                .upsert_chat_message(&message("partial", "chat", present))
+                .unwrap();
+            store
+                .upsert_chat_message(&message(
+                    "complete",
+                    "chat",
+                    &format!("{present} absent xy"),
+                ))
+                .unwrap();
+            for (scope, id) in [
+                (SearchScope::Chat, "chat"),
+                (SearchScope::Project, "project"),
+                (SearchScope::All, ""),
+            ] {
+                for extra in ["absent", "xy"] {
+                    let query = format!("{present} {extra}");
+                    let page = store
+                        .search_chat_messages(&request(&query, scope, id).prepare().unwrap())
+                        .unwrap();
+                    assert_eq!(page.hits.len(), 1);
+                    assert_eq!(page.hits[0].message_id, "complete");
+                }
+            }
+            store
+                .upsert_chat_message(&message("complete-2", "chat", &format!("{present} absent")))
+                .unwrap();
+            let query = format!("{present} absent");
+            let mut first = request(&query, SearchScope::Chat, "chat");
+            first.limit = Some(1);
+            let first = store
+                .search_chat_messages(&first.prepare().unwrap())
+                .unwrap();
+            let cursor = first.cursor.expect("another matching message");
+            let mut changed = request(&format!("{present} other"), SearchScope::Chat, "chat");
+            changed.cursor = Some(cursor.clone());
+            assert!(changed.prepare().is_err());
+            let mut next = request(&query, SearchScope::Chat, "chat");
+            next.limit = Some(1);
+            next.cursor = Some(cursor);
+            let next = store
+                .search_chat_messages(&next.prepare().unwrap())
+                .unwrap();
+            assert_eq!(next.hits.len(), 1);
+            assert_ne!(first.hits[0].message_id, next.hits[0].message_id);
+        });
     }
 
     #[test]
@@ -974,7 +1032,7 @@ mod tests {
         req.cursor = Some("bad-cursor".into());
         assert!(req.prepare().is_err());
         let selection = request(&"word ".repeat(17), SearchScope::All, "");
-        assert_eq!(selection.prepare().unwrap().terms.len(), 16);
+        assert_eq!(selection.prepare().unwrap().terms.len(), 17);
     }
 
     #[test]
