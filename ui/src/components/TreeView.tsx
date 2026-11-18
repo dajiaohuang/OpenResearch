@@ -612,11 +612,11 @@ export function TreeView({
     id: node.id, title: node.data.exp.title ?? "", slug: node.data.exp.slug,
     status: node.data.latestRun?.status ?? null,
   }] : []), edges, search, status), [nodes, edges, search, status]);
-  const filteredNodes = filterActive ? nodes.filter((node) => matches.visible.has(node.id)).map((node) => ({
+  const filteredNodes = useMemo(() => filterActive ? nodes.filter((node) => matches.visible.has(node.id)).map((node) => ({
     ...node, className: matches.matching.has(node.id) ? "ring-2 ring-focus rounded-md" : undefined,
-  })) : nodes;
-  const filteredEdges = filterActive ? edges.filter((edge) => matches.visible.has(edge.source) && matches.visible.has(edge.target)) : edges;
-  const results = nodes.filter((node): node is ExpFlowNode => node.type === "exp" && matches.matching.has(node.id));
+  })) : nodes, [filterActive, nodes, matches]);
+  const filteredEdges = useMemo(() => filterActive ? edges.filter((edge) => matches.visible.has(edge.source) && matches.visible.has(edge.target)) : edges, [filterActive, edges, matches]);
+  const results = useMemo(() => nodes.filter((node): node is ExpFlowNode => node.type === "exp" && matches.matching.has(node.id)), [nodes, matches]);
   const moveViewport = async (action: (flow: NonNullable<typeof flowRef.current>) => Promise<boolean>) => {
     const flow = flowRef.current;
     const scope = scopeRef.current;
