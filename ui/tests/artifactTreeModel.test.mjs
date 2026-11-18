@@ -69,6 +69,14 @@ test("filtering trims nested folders down to their matches", () => {
   );
 });
 
+test("filtering finds a file by its directory-relative path", () => {
+  const entry = { ...file("loss.png", 5), path: "outputs/figures/loss.png" };
+  const folder = { ...file("figures", 20, [entry]), path: "outputs/figures" };
+  const entries = [file("outputs", 20, [folder])];
+  const [outputs] = filterArtifactEntries(entries, "figures/loss");
+  assert.equal(outputs.children[0].children[0].path, "outputs/figures/loss.png");
+});
+
 test("filtering is case-insensitive and an empty query keeps everything", () => {
   const entries = [file("Report.md", 30)];
   assert.equal(filterArtifactEntries(entries, "REPORT").length, 1);

@@ -23,7 +23,7 @@ export function filterArtifactEntries(entries: ArtifactEntry[], query: string): 
   if (!needle) return entries;
   const matches = (name: string) => name.toLowerCase().includes(needle);
   const keep = (entry: ArtifactEntry): ArtifactEntry | null => {
-    if (matches(entry.name)) return entry;
+    if (matches(entry.path)) return entry;
     if (!entry.isDir) return null;
     const kept = (entry.children ?? []).map(keep).filter((child): child is ArtifactEntry => child !== null);
     return kept.length === 0 ? null : { ...entry, children: kept };
