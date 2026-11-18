@@ -5194,15 +5194,18 @@ impl ChatHost {
     /// Remove one parked message by id (the ✕ on a queued chip).
     pub fn cancel_queued(self: &Arc<Self>, session_id: &str, item_id: &str) -> Result<bool> {
         let _mutation = self.queue_persistence.lock().unwrap();
-        if self
+        let refresh_failed = self
             .queue_refresh_errors
             .lock()
             .unwrap()
-            .contains_key(session_id)
-        {
+            .contains_key(session_id);
+        if refresh_failed {
             self.release_refresh_claim_if_idle(session_id)?;
         }
         let store = Store::open()?;
+        if refresh_failed {
+            self.refresh_persisted_queue_locked(session_id, &store)?;
+        }
         let (removed, exhausted_head) = {
             let mut map = self.queued.lock().unwrap();
             let Some(q) = map.get_mut(session_id) else {
@@ -13799,6 +13802,132 @@ mod run_wakeup_tests {
         host.stop_admitting();
         assert!(!store.chat_turn_leased("owner").unwrap());
         assert_eq!(host.queued_items("owner")[0]["dispatchState"], "queued");
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_after_refresh_failure_preserves_new_persisted_messages() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        store
+            .create_local_project(&crate::store::tests::local_project_fixture("p1"))
+            .unwrap();
+        session(&store, "owner");
+        let host = notice_host();
+        let mut copy = TurnGuard::claim_idle_for_copy(&host, "owner")
+            .await
+            .unwrap();
+        assert!(
+            host.send_message(
+                "owner",
+                "first".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_first".into()),
+                None
+            )
+            .await
+            .unwrap()
+            .queued
+        );
+        let first = host.queued.lock().unwrap()["owner"]
+            .front()
+            .unwrap()
+            .clone();
+        let old_data_dir = std::env::var_os("ORX_DATA_DIR");
+        let unavailable = crate::config::test_home().join("not-a-directory");
+        std::fs::write(&unavailable, b"fixture").unwrap();
+        std::env::set_var("ORX_DATA_DIR", &unavailable);
+        copy.release().await;
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        let mut second = first.clone();
+        second.id = "q_new".into();
+        second.client_turn_id = "ct_new".into();
+        second.text = "second".into();
+        store
+            .insert_queued_chat_message(&crate::store::StoredQueuedChatMessage {
+                id: second.id.clone(),
+                session_id: "owner".into(),
+                client_turn_id: second.client_turn_id.clone(),
+                request_hash: second.request_hash.clone(),
+                payload_json: serde_json::to_string(&second).unwrap(),
+                created_at: i64::MAX,
+            })
+            .unwrap();
+        match old_data_dir {
+            Some(value) => std::env::set_var("ORX_DATA_DIR", value),
+            None => std::env::remove_var("ORX_DATA_DIR"),
+        }
+        assert!(host.cancel_queued("owner", &first.id).unwrap());
+        let items = host.queued_items("owner");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "q_new");
+        assert_eq!(items[0]["dispatchState"], "blocked");
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store.chat_turn_leased("owner").unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_after_refresh_failure_preserves_queue_for_new_host() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        store
+            .create_local_project(&crate::store::tests::local_project_fixture("p1"))
+            .unwrap();
+        session(&store, "owner");
+        let host = notice_host();
+        let mut copy = TurnGuard::claim_idle_for_copy(&host, "owner")
+            .await
+            .unwrap();
+        assert!(
+            host.send_message(
+                "owner",
+                "after restart".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_restart".into()),
+                None
+            )
+            .await
+            .unwrap()
+            .queued
+        );
+        let old_data_dir = std::env::var_os("ORX_DATA_DIR");
+        let unavailable = crate::config::test_home().join("not-a-directory");
+        std::fs::write(&unavailable, b"fixture").unwrap();
+        std::env::set_var("ORX_DATA_DIR", &unavailable);
+        copy.release().await;
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        match old_data_dir {
+            Some(value) => std::env::set_var("ORX_DATA_DIR", value),
+            None => std::env::remove_var("ORX_DATA_DIR"),
+        }
+        host.stop_admitting();
+        host.release_turn_leases();
+        assert!(!store.chat_turn_leased("owner").unwrap());
+        let restarted = notice_host();
+        let items = restarted.queued_items("owner");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["text"], "after restart");
+        assert_eq!(items[0]["dispatchState"], "queued");
         assert_eq!(
             store
                 .list_queued_chat_messages_for_session("owner")
