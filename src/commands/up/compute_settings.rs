@@ -1099,9 +1099,9 @@ use crate::jobs::slurm;
 /// One payload powers the whole settings card: stored cluster defaults plus
 /// the ssh hosts to pick a login node from (same `~/.ssh/config` source as
 /// the ssh backend — a Slurm login node is just an ssh host).
-pub(super) fn slurm_settings_json() -> Value {
-    let settings = slurm::load_settings().ok().flatten().unwrap_or_default();
-    json!({
+pub(super) fn slurm_settings_json() -> Result<Value> {
+    let settings = slurm::load_settings()?.unwrap_or_default();
+    Ok(json!({
         "host": settings.host,
         "partition": settings.partition,
         "account": settings.account,
@@ -1114,11 +1114,11 @@ pub(super) fn slurm_settings_json() -> Value {
         "sbatchArgs": settings.sbatch_args,
         "requestOneTask": settings.request_one_task != Some(false),
         "hosts": list_ssh_hosts(),
-    })
+    }))
 }
 
 pub(super) async fn slurm_settings() -> ApiResult {
-    tokio::task::spawn_blocking(|| Ok(Json(slurm_settings_json())))
+    tokio::task::spawn_blocking(|| Ok(Json(slurm_settings_json()?)))
         .await
         .map_err(|e| ApiError::from(anyhow!("slurm task failed: {e}")))?
 }
@@ -1192,6 +1192,8 @@ pub(super) async fn set_slurm_settings(
     // One spawn_blocking around the whole load→mutate→save→respond body
     // (settings + ~/.ssh/config are sync fs I/O), like the git handlers.
     tokio::task::spawn_blocking(move || {
+        let mut lock = slurm::settings_lock()?;
+        let _guard = lock.write().map_err(crate::error::Error::from)?;
         let mut settings = slurm::load_settings()?.unwrap_or_default();
         let mut errors: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
         let mut reject = |field, error: crate::error::Error| {
@@ -1308,7 +1310,7 @@ pub(super) async fn set_slurm_settings(
             return Err(SlurmSaveError::Fields(errors));
         }
         slurm::save_settings(&settings)?;
-        Ok(Json(slurm_settings_json()))
+        Ok(Json(slurm_settings_json()?))
     })
     .await
     .map_err(|e| SlurmSaveError::from(anyhow!("slurm task failed: {e}")))?
@@ -2120,6 +2122,45 @@ mod tests {
             let saved: Value =
                 serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap();
             assert_eq!(saved["fieldFromANewerOrx"], newer, "{file}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_slurm_settings_are_reported_without_overwrite() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = crate::config::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("slurm.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(slurm_settings_json()
+            .unwrap_err()
+            .to_string()
+            .contains("Unreadable"));
+        let req = serde_json::from_value(json!({"partition": "gpu"})).unwrap();
+        assert!(set_slurm_settings(Json(req)).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
+
+    #[tokio::test]
+    async fn concurrent_slurm_patches_preserve_both_fields() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        for _ in 0..24 {
+            slurm::save_settings(&Default::default()).unwrap();
+            let partition = serde_json::from_value(json!({"partition":"gpu"})).unwrap();
+            let memory = serde_json::from_value(json!({"mem":"16G"})).unwrap();
+            let (a, b) = tokio::join!(
+                set_slurm_settings(Json(partition)),
+                set_slurm_settings(Json(memory))
+            );
+            let _ = a.unwrap();
+            let _ = b.unwrap();
+            let saved = slurm::load_settings().unwrap().unwrap();
+            assert_eq!(saved.partition.as_deref(), Some("gpu"));
+            assert_eq!(saved.mem.as_deref(), Some("16G"));
         }
     }
 

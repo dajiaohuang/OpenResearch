@@ -82,7 +82,13 @@ fn settings_path() -> std::path::PathBuf {
 pub fn load_settings() -> Result<Option<SlurmSettings>> {
     let raw = match std::fs::read_to_string(settings_path()) {
         Ok(raw) => raw,
-        Err(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow!(
+                "Could not read {}: {error}",
+                settings_path().display()
+            ))
+        }
     };
     match serde_json::from_str::<SlurmSettings>(&raw) {
         Ok(s) => Ok(Some(s)),
@@ -100,8 +106,22 @@ pub fn save_settings(settings: &SlurmSettings) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let body = format!("{}\n", serde_json::to_string_pretty(settings)?);
-    std::fs::write(&path, body)?;
-    Ok(())
+    crate::local::git::atomic_write_with_mode(&path, body.as_bytes(), None)
+}
+
+/// Serialize each read-modify-write across cooperating orx processes.
+pub(crate) fn settings_lock() -> Result<fd_lock::RwLock<std::fs::File>> {
+    let path = settings_path().with_extension("lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    Ok(fd_lock::RwLock::new(file))
 }
 
 /// Validate a Slurm memory request: a positive integer with an optional
@@ -400,6 +420,24 @@ pub async fn diagnostics(host: &str, job_id: &str) -> Result<serde_json::Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn refusing_a_symlink_preserves_its_target() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = crate::config::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("keep.json");
+        std::fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink(&target, settings_path()).unwrap();
+        assert!(save_settings(&SlurmSettings::default()).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert!(std::fs::symlink_metadata(settings_path())
+            .unwrap()
+            .is_symlink());
+    }
 
     #[test]
     fn mem_parses_slurm_sizes_and_rejects_the_rest() {
