@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_external_warning": "여기에서 저장하기 전에 다른 편집기의 저장을 마치세요. 동시에 저장한 외부 변경 사항이 덮어쓰일 수 있습니다.",
   "settings_shared_instructions_description": "이 지침은 모든 프로젝트의 OpenResearch 채팅에 적용됩니다. 변경 사항은 다음 턴부터 적용됩니다.",
   "workspace_active_experiments": "활성 실험",
   "files_empty_description": "이 작업 공간의 파일이 여기에 표시됩니다. 에이전트에게 파일 생성을 요청하여 시작하세요.",

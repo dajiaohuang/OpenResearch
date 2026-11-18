@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_external_warning": "Przed zapisaniem tutaj zakończ zapisywanie w innych edytorach. Jednoczesny zapis zewnętrzny może zostać nadpisany.",
   "settings_shared_instructions_description": "Te instrukcje dotyczą czatów OpenResearch we wszystkich projektach. Zmiany obowiązują od następnej tury.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "projects_delete_artifacts_kept": "Artefakty zostaną zachowane, chyba że wybierzesz poniższą opcję. Puste foldery artefaktów są usuwane automatycznie.",

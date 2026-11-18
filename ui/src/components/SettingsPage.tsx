@@ -5159,6 +5159,7 @@ export function SharedInstructionsSettings() {
   return <>
     <h2>AGENTS.md</h2>
     <p>{m.settings_shared_instructions_description()}</p>
+    <p>{m.settings_shared_instructions_external_warning()}</p>
     {error && <p role="alert">{error}</p>}
     {loaded && <div className="flex flex-col gap-3">
       <label htmlFor={id}>AGENTS.md</label>

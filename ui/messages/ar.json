@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_external_warning": "أكمل الحفظ في المحررات الأخرى قبل الحفظ هنا. قد تُستبدل التغييرات الخارجية المحفوظة في الوقت نفسه.",
   "settings_shared_instructions_description": "تنطبق هذه التعليمات على محادثات OpenResearch في جميع المشاريع. تسري التغييرات في الدور التالي.",
   "workspace_active_experiments": "التجارب النشطة",
   "files_empty_description": "ستظهر ملفات مساحة العمل هنا. اطلب من الوكيل إنشاء ملف للبدء.",

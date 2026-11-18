@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_external_warning": "यहाँ सहेजने से पहले अन्य संपादकों में सहेजना पूरा करें। एक साथ किया गया बाहरी बदलाव मिट सकता है।",
   "settings_shared_instructions_description": "ये निर्देश सभी परियोजनाओं की OpenResearch चैट पर लागू होते हैं। बदलाव अगले टर्न से लागू होंगे।",
   "workspace_active_experiments": "सक्रिय प्रयोग",
   "files_empty_description": "इस वर्कस्पेस की फ़ाइलें यहाँ दिखेंगी। शुरू करने के लिए एजेंट से एक फ़ाइल बनाने को कहें।",

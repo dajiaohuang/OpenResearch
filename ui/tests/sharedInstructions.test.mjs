@@ -15,6 +15,7 @@ test("external edit keeps the draft when saving conflicts", async () => {
   });
   await render(createElement(SharedInstructionsSettings));
   await settle();
+  assert.ok(document.body.textContent.includes(m.settings_shared_instructions_external_warning()));
   const input = document.querySelector("textarea");
   assert.equal(input.value, "original");
   await type(input, " draft");

@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_external_warning": "在此保存前，请先完成其他编辑器中的保存操作。同时发生的外部保存可能被覆盖。",
   "settings_shared_instructions_description": "这些指令适用于所有项目中的 OpenResearch 聊天，更改将在下一轮生效。",
   "workspace_active_experiments": "活跃实验",
   "files_empty_description": "此工作区中的文件会显示在这里。让智能体创建一个文件即可开始。",

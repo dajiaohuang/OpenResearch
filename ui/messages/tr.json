@@ -1,4 +1,5 @@
 {
+  "settings_shared_instructions_external_warning": "Burada kaydetmeden önce diğer düzenleyicilerdeki kaydı tamamlayın. Eş zamanlı dış kayıtların üzerine yazılabilir.",
   "settings_shared_instructions_description": "Bu talimatlar tüm projelerdeki OpenResearch sohbetleri için geçerlidir. Değişiklikler sonraki turda uygulanır.",
   "workspace_active_experiments": "Etkin Deneyler",
   "files_empty_description": "Bu çalışma alanındaki dosyalar burada görünür. Başlamak için ajandan bir dosya oluşturmasını isteyin.",
