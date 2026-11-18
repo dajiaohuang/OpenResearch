@@ -15,7 +15,7 @@ export const refLabel = (cited: string) => `#${cited.slice("msg_".length)}`;
 export function firstLine(text: string): string {
   const line = text.split("\n").find((candidate) => candidate.trim()) ?? "";
   return line
-    .replace(/^[\s#>*_-]+/, "")
+    .replace(/^(?:[\s#>*_]|-(?=\s))+/, "")
     .replace(/\*+|__|`/g, "")
     .trim();
 }
