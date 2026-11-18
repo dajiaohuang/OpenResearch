@@ -13536,6 +13536,130 @@ mod run_wakeup_tests {
         tx.commit().unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_instructions_reach_first_and_resident_acp_turns() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let root = crate::config::test_home().join("shared-acp-fixture");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("README.md"), "fixture").unwrap();
+        for args in [
+            &["init", "--quiet", "--initial-branch", "main"][..],
+            &["add", "README.md"],
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            assert!(crate::local::git::git_command()
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let store = Store::open().unwrap();
+        let mut project = crate::store::tests::local_project_fixture("p1");
+        project.repo_path = repo.to_string_lossy().into_owned();
+        store.create_local_project(&project).unwrap();
+        let id = "acp:00000000-0000-4000-8000-000000000001";
+        session(&store, "owner");
+        let record = root.join("peer.jsonl");
+        let definition = crate::local::acp::Definition {
+            id: id.into(),
+            name: "Fixture".into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
+            arguments: vec![
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/local/harness/fixtures/acp-peer.py"
+                )
+                .into(),
+                "normal".into(),
+                record.to_string_lossy().into_owned(),
+            ],
+            unknown: Default::default(),
+        };
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET harness = ?1 WHERE id = 'owner'",
+            [id],
+        )
+        .unwrap();
+        tx.execute("INSERT INTO acp_sessions (session_id, launch_json, configuration_json) VALUES (?1, ?2, '[]')", rusqlite::params!["owner", serde_json::to_string(&definition).unwrap()]).unwrap();
+        tx.commit().unwrap();
+        std::fs::create_dir_all(crate::config::config_dir()).unwrap();
+        let instructions = crate::config::config_dir().join("AGENTS.md");
+        let host = notice_host();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            for (index, value) in ["FIRST_SHARED", "SECOND_SHARED", "THIRD_SHARED"]
+                .into_iter()
+                .enumerate()
+            {
+                if index == 2 {
+                    host.acp.stop("owner").await;
+                }
+                std::fs::write(&instructions, value).unwrap();
+                host.send_message(
+                    "owner",
+                    format!("question {}", index + 1),
+                    TurnOverrides::default(),
+                    vec![],
+                    vec![],
+                    Some(format!("ct-{index}")),
+                    None,
+                )
+                .await
+                .unwrap();
+                while host.is_busy("owner").await {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        })
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(20), host.acp.shutdown())
+            .await
+            .unwrap();
+        result.expect("ACP turns did not finish");
+        let records = std::fs::read_to_string(record).unwrap();
+        let prompts: Vec<serde_json::Value> = records
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|record: &serde_json::Value| record["method"] == "session/prompt")
+            .collect();
+        assert_eq!(prompts.len(), 3, "{records}");
+        assert!(
+            records.contains("session/load") || records.contains("session/resume"),
+            "{records}"
+        );
+        for (record, expected) in
+            prompts
+                .iter()
+                .zip(["FIRST_SHARED", "SECOND_SHARED", "THIRD_SHARED"])
+        {
+            let text = record["params"]["prompt"][0]["text"].as_str().unwrap();
+            assert_eq!(text.matches(expected).count(), 1, "{text}");
+            assert_eq!(
+                text.matches("<openresearch-instructions>").count(),
+                1,
+                "{text}"
+            );
+            for other in ["FIRST_SHARED", "SECOND_SHARED", "THIRD_SHARED"] {
+                if other != expected {
+                    assert!(!text.contains(other), "{text}");
+                }
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle() {
         const CHILD: &str = "ORX_TEST_CHAT_OUTBOX";
@@ -15831,6 +15955,12 @@ pub(crate) mod steering_tests {
     async fn live_steering_retries_share_the_original_admission() {
         const TEST_ENV: &str = "ORX_STEER_RECEIPT_TEST";
         if let Some(dir) = std::env::var_os(TEST_ENV) {
+            std::fs::create_dir_all(crate::config::config_dir()).unwrap();
+            std::fs::write(
+                crate::config::config_dir().join("AGENTS.md"),
+                "STEERING_SECRET_MARKER",
+            )
+            .unwrap();
             let store = Store::open().unwrap();
             add_test_session(&store);
             let host = test_host();
@@ -15850,6 +15980,8 @@ pub(crate) mod steering_tests {
             assert!(send().await.unwrap().is_none());
             let steer = rx.try_recv().unwrap();
             assert_eq!(steer.client_turn_id.as_deref(), Some("ct1"));
+            assert_eq!(steer.text, "hello");
+            assert!(!steer.text.contains("STEERING_SECRET_MARKER"));
             assert_eq!(host.queued_items("owner")[0]["dispatchState"], "steering");
             assert!(send().await.unwrap().is_none());
             assert!(rx.try_recv().is_err());
