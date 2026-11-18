@@ -17,7 +17,8 @@ export function resolveSyntaxLanguage(language: string): string {
 
 export function detectSyntaxLanguageFromFilePath(filePath: string | null | undefined): string | null {
   if (!filePath) return null;
-  const fileName = filePath.split("/").pop()?.toLowerCase() ?? "";
+  const segments = /^[a-z]:[\\/]/i.test(filePath) ? filePath.split(/[\\/]/) : filePath.split("/");
+  const fileName = segments.pop()?.toLowerCase() ?? "";
   const aliasedFileLanguage = FILE_NAME_LANGUAGES[fileName];
   if (aliasedFileLanguage) return resolveSyntaxLanguage(aliasedFileLanguage);
   const extensionIndex = fileName.lastIndexOf(".");
