@@ -4,15 +4,18 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Menu } from "@base-ui/react/menu";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, FileCode } from "lucide-react";
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { ltr } from "../i18n";
 import { GLOB_CHARS, resolveFileReference } from "../fileReferences";
 import { splitMentionPath } from "../fileMentions";
 import { isWindowsDrivePath, splitLineSuffix } from "../markdownTarget";
 import { m } from "../paraglide/messages.js";
+import { parseFilePath } from "../fileTabPath";
+import { RuntimeContext } from "../RemoteRuntime";
 
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { MenuItem } from "./ui";
+import { MenuItem, showAlert } from "./ui";
+import { FileContextMenu, fileContextMenuTarget, type FileContextMenuTarget } from "./FileTreeActions";
 
 export type OpenFile = (
   path: string,
@@ -32,9 +35,46 @@ export function FileChip({ path, line, exp, onOpenFile }: {
   exp?: string;
   onOpenFile?: OpenFile;
 }) {
+  const workspace = useWorkspace();
+  const scope = useContext(FileScopeContext);
+  const runtime = useContext(RuntimeContext);
+  const [menu, setMenu] = useState<FileContextMenuTarget | null>(null);
+  const [location, setLocation] = useState<{ path: string; source: "checkout" | "artifact" | "absolute"; sessionId?: string; root?: string } | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const sequence = useRef(0);
   const name = path.split("/").pop() || path;
   const label = line != null ? `${name}:${line}` : name;
-  return (
+  const openMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (!scope || !onOpenFile) return;
+    event.preventDefault();
+    setMenu(fileContextMenuTarget(event, path));
+    setLocation(null);
+    setNote(null);
+    const request = ++sequence.current;
+    void (async () => {
+      const projects = await workspace.queryClient.fetchQuery(workspace.queries.listProjectsQuery());
+      const project = projects.find((item) => item.id === scope.projectId);
+      if (!project) throw new Error(m.file_tree_location_unavailable());
+      const tab = parseFilePath(path, project.repoPath, scope.sessionId ?? undefined, project.artifactsDir ?? project.filesDir, project.slug);
+      if (!tab) throw new Error(m.file_tree_location_unavailable());
+      if (exp && (tab.source == null || tab.source === "repo")) throw new Error(m.file_tree_location_historical());
+      const loaded = await workspace.queryClient.fetchQuery({ ...workspace.queries.resolvedFileQuery(scope.projectId, tab.path, tab.source ?? "repo", tab.sessionId, tab.ref), staleTime: 0 });
+      if (loaded.file.notFound || (loaded.source === "checkout" && loaded.file.root === "branch")) throw new Error(m.file_tree_location_unavailable());
+      if (request !== sequence.current) return;
+      setLocation({ path: loaded.file.path, source: loaded.source, ...(tab.sessionId ? { sessionId: tab.sessionId } : {}), ...(loaded.source === "checkout" ? { root: loaded.file.root } : {}) });
+    })().catch((error: unknown) => { if (request === sequence.current) setNote(error instanceof Error ? error.message : String(error)); });
+  };
+  const action = async (reveal: boolean) => {
+    if (!scope || !location) return;
+    try {
+      const result = await workspace.api.fileLocation(scope.projectId, location, reveal);
+      if (!reveal) {
+        await navigator.clipboard.writeText(result.path);
+        showAlert(m.common_copied(), "success");
+      }
+    } catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
+  };
+  return <>
     <button
       className="file-chip"
       title={onOpenFile ? m.a11y_open_file_in_panel({ path: ltr(path) }) : path}
@@ -42,11 +82,17 @@ export function FileChip({ path, line, exp, onOpenFile }: {
         onOpenFile?.(path, line, exp, undefined, intent),
       )}
       disabled={!onOpenFile}
+      onContextMenu={openMenu}
     >
       <FileCode size={12} />
       <span className="file-chip-label">{label}</span>
     </button>
-  );
+    {menu && <FileContextMenu target={menu} onOpen={() => onOpenFile?.(path, line, exp, undefined, "preview")}
+      onCopyPath={location ? () => void action(false) : undefined}
+      onReveal={location && runtime?.kind === "local" ? () => void action(true) : undefined}
+      note={note ?? (!location ? m.settings_page_loading() : undefined)}
+      onClose={() => { sequence.current++; setMenu(null); }} />}
+  </>;
 }
 
 /** A reference that is not certain to be one file: the reader picks the match. */

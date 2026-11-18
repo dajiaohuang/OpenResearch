@@ -108,6 +108,7 @@ export function FileContextMenu({
   onDuplicate,
   onCopyPath,
   onReveal,
+  note,
   onDelete,
   onClose,
 }: {
@@ -115,8 +116,9 @@ export function FileContextMenu({
   onOpen: () => void;
   onRename?: () => void;
   onDuplicate?: () => void;
-  onCopyPath: () => void;
+  onCopyPath?: () => void;
   onReveal?: () => void;
+  note?: string;
   onDelete?: () => void;
   onClose: () => void;
 }) {
@@ -164,7 +166,8 @@ export function FileContextMenu({
               {onReveal && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onReveal}>{revealLabel}</Menu.Item>}
               {onRename && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>}
               {onDuplicate && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onDuplicate}>{m.file_tree_duplicate()}</Menu.Item>}
-              <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onCopyPath}>{m.artifacts_copy_path()}</Menu.Item>
+              {onCopyPath && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onCopyPath}>{m.artifacts_copy_path()}</Menu.Item>}
+              {note && <div role="status" className="px-2 py-1 text-sm text-subtext">{note}</div>}
               {onDelete && <Menu.Item nativeButton render={<MenuItem size="compact" danger className="data-highlighted:bg-surface" />} onClick={onDelete}>{m.chat_panel_delete()}</Menu.Item>}
             </Menu.Popup>
           </Menu.Positioner>

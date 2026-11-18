@@ -1,4 +1,6 @@
 {
+  "file_tree_location_unavailable": "موقع الملف غير متاح. أعد فتح الملف وحاول مجدداً.",
+  "file_tree_location_historical": "يشير هذا المرجع إلى إصدار سابق بلا موقع متحقق منه على القرص.",
   "workspace_active_experiments": "التجارب النشطة",
   "files_empty_description": "ستظهر ملفات مساحة العمل هنا. اطلب من الوكيل إنشاء ملف للبدء.",
   "experiments_empty_description": "ستظهر التجارب وعمليات تشغيلها هنا. اطلب من الوكيل إعداد تجربة للبدء.",

@@ -742,6 +742,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
         .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
+        .route("/api/projects/{id}/file/location", post(file_location))
+        .route(
+            "/api/projects/{id}/file/location/reveal",
+            post(reveal_file_location),
+        )
         .route("/api/projects/{id}/file/latex", post(compile_project_latex))
         .route("/api/latex/engine", get(latex_engine))
         .route(
@@ -1199,6 +1204,7 @@ fn remote_route_forbidden(path: &str) -> bool {
         || (path.starts_with("/api/projects/")
             && (path.ends_with("/file/open")
                 || path.ends_with("/file/reveal")
+                || path.ends_with("/file/location/reveal")
                 || path.ends_with("/files/reveal")))
 }
 
@@ -4486,6 +4492,91 @@ async fn write_project_file(
 struct OpenProjectFileReq {
     path: String,
     session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileLocationReq {
+    path: String,
+    source: String,
+    session_id: Option<String>,
+    root: Option<String>,
+}
+
+async fn file_location(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<FileLocationReq>,
+) -> ApiResult {
+    resolve_file_location(state, id, req, false).await
+}
+
+async fn reveal_file_location(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<FileLocationReq>,
+) -> ApiResult {
+    resolve_file_location(state, id, req, true).await
+}
+
+async fn resolve_file_location(
+    state: AppState,
+    id: String,
+    req: FileLocationReq,
+    reveal: bool,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let full = match req.source.as_str() {
+            "checkout" => {
+                let (_, rel) = validated_project_file_path(&req.path)?;
+                if touches_git_dir(&rel) {
+                    return Err(bad_request("cannot locate files under .git"));
+                }
+                let (root, kind) =
+                    resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+                if req.root.as_deref() != Some(kind) {
+                    return Err(bad_request("file source changed; reopen the file"));
+                }
+                let full = crate::paths::canonicalize(root.join(rel))
+                    .map_err(|e| ApiError::from(anyhow!("could not resolve file: {e}")))?;
+                if !full.starts_with(&root) {
+                    return Err(bad_request("path escapes repository"));
+                }
+                if touches_git_dir(
+                    full.strip_prefix(&root)
+                        .map_err(|e| ApiError::from(anyhow!("could not resolve file: {e}")))?,
+                ) {
+                    return Err(bad_request("cannot locate files under .git"));
+                }
+                full
+            }
+            "artifact" => local::files::file_path(&project, &req.path).map_err(ApiError::from)?,
+            "absolute" => {
+                let (_, path) = validated_absolute_file_path(&req.path)?;
+                crate::paths::canonicalize(path)
+                    .map_err(|e| ApiError::from(anyhow!("could not resolve file: {e}")))?
+            }
+            _ => return Err(bad_request("unsupported file source")),
+        };
+        if !full.is_file() {
+            return Err(bad_request("file is unavailable"));
+        }
+        if reveal {
+            crate::editors::reveal_in_file_manager(&full)
+                .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
+        }
+        Ok(Json(json!({ "path": full.to_string_lossy() })))
+    })
+    .await
 }
 
 /// Canonical path of a checkout-relative file, confined to the checkout root.
@@ -12118,6 +12209,7 @@ mod tests {
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
             "/api/projects/p1/file/reveal",
+            "/api/projects/p1/file/location/reveal",
             "/api/projects/p1/files/reveal",
         ] {
             assert!(remote_route_forbidden(path), "{path}");
@@ -12129,6 +12221,7 @@ mod tests {
         assert!(!remote_route_forbidden("/api/harnesses/setup"));
         assert!(!remote_route_forbidden("/api/settings/network"));
         assert!(!remote_route_forbidden("/api/projects/p1/file"));
+        assert!(!remote_route_forbidden("/api/projects/p1/file/location"));
     }
 
     #[test]
@@ -12954,6 +13047,94 @@ mod tests {
             trackio: Default::default(),
             opencode_signins: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn file_location_rechecks_source_and_rejects_traversal() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = crate::config::test_home().join("location-repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.md"), b"fixture").unwrap();
+        let store = Store::open().unwrap();
+        let mut project = crate::store::tests::local_project_fixture("location-project");
+        project.repo_path = dir.to_string_lossy().into_owned();
+        store.create_local_project(&project).unwrap();
+        let request = |path: &str, root: &str| FileLocationReq {
+            path: path.into(),
+            source: "checkout".into(),
+            session_id: None,
+            root: Some(root.into()),
+        };
+        let result = file_location(
+            State(test_state()),
+            Path(project.id.clone()),
+            Json(request("report.md", "clone")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.0["path"],
+            crate::paths::canonicalize(dir.join("report.md"))
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(file_location(
+            State(test_state()),
+            Path(project.id.clone()),
+            Json(request("report.md", "worktree"))
+        )
+        .await
+        .is_err());
+        assert!(file_location(
+            State(test_state()),
+            Path(project.id.clone()),
+            Json(request("../outside", "clone"))
+        )
+        .await
+        .is_err());
+        assert!(file_location(
+            State(test_state()),
+            Path(project.id.clone()),
+            Json(request("missing", "clone"))
+        )
+        .await
+        .is_err());
+        let artifacts = local::files::ensure_dir(&project).unwrap();
+        std::fs::write(artifacts.join("output.txt"), b"artifact").unwrap();
+        let artifact = FileLocationReq {
+            path: "output.txt".into(),
+            source: "artifact".into(),
+            session_id: None,
+            root: None,
+        };
+        let result = file_location(
+            State(test_state()),
+            Path(project.id.clone()),
+            Json(artifact),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.0["path"],
+            crate::paths::canonicalize(artifacts.join("output.txt"))
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        let historical = FileLocationReq {
+            path: "report.md".into(),
+            source: "branch".into(),
+            session_id: None,
+            root: None,
+        };
+        assert!(
+            file_location(State(test_state()), Path(project.id), Json(historical))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

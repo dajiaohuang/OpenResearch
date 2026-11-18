@@ -1,4 +1,6 @@
 {
+  "file_tree_location_unavailable": "Dosya konumu kullanılamıyor. Dosyayı yeniden açıp tekrar deneyin.",
+  "file_tree_location_historical": "Bu başvuru geçmiş bir sürümdür ve doğrulanmış bir disk konumu yoktur.",
   "workspace_active_experiments": "Etkin Deneyler",
   "files_empty_description": "Bu çalışma alanındaki dosyalar burada görünür. Başlamak için ajandan bir dosya oluşturmasını isteyin.",
   "experiments_empty_description": "Deneyler ve çalıştırmaları burada görünür. Başlamak için ajandan bir deney kurmasını isteyin.",

@@ -1,4 +1,6 @@
 {
+  "file_tree_location_unavailable": "ファイルの場所を確認できません。ファイルを開き直して再試行してください。",
+  "file_tree_location_historical": "この参照は過去のバージョンで、確認済みのディスク上の場所はありません。",
   "workspace_active_experiments": "進行中の実験",
   "files_empty_description": "このワークスペースのファイルがここに表示されます。エージェントにファイルの作成を依頼して始めましょう。",
   "experiments_empty_description": "実験と実行履歴がここに表示されます。エージェントに実験の設定を依頼して始めましょう。",

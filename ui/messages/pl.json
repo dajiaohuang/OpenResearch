@@ -1,4 +1,6 @@
 {
+  "file_tree_location_unavailable": "Lokalizacja pliku jest niedostępna. Otwórz plik ponownie i spróbuj jeszcze raz.",
+  "file_tree_location_historical": "To odwołanie wskazuje wersję historyczną bez potwierdzonej lokalizacji na dysku.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "projects_delete_artifacts_kept": "Artefakty zostaną zachowane, chyba że wybierzesz poniższą opcję. Puste foldery artefaktów są usuwane automatycznie.",
   "projects_delete_artifacts_remove": "Trwale usuń pliki artefaktów tego projektu",
