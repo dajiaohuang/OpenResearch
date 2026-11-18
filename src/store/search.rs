@@ -489,6 +489,7 @@ mod tests {
             for query in [
                 "αοσ".to_string(),
                 format!("{prefix} αοσ"),
+                format!("{prefix} {prefix} αοσ"),
                 "αοσ xy".to_string(),
                 format!("{prefix} αοσ xy"),
             ] {
@@ -501,6 +502,15 @@ mod tests {
                     .unwrap();
                 assert_eq!(page.hits.len(), 1, "query {query}");
             }
+            let absent = format!("{prefix} {prefix} αβγ");
+            let page = store
+                .search_chat_messages(
+                    &request(&absent, SearchScope::Chat, "chat")
+                        .prepare()
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(page.hits.is_empty());
         });
     }
 
