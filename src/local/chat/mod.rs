@@ -4646,7 +4646,13 @@ impl ChatHost {
         Ok(())
     }
 
-    fn release_refresh_claim_if_idle(&self, session_id: &str) -> Result<()> {
+    /// Serialize recovery with other processes claiming this chat's durable lease.
+    fn with_refresh_custody<T>(
+        &self,
+        session_id: &str,
+        store: &Store,
+        action: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
         let turns = self
             .turns
             .try_lock()
@@ -4654,7 +4660,26 @@ impl ChatHost {
         if turns.contains_key(session_id) {
             return Err(anyhow!("The chat is still finishing; try again."));
         }
-        self.release_durable_turn(session_id)
+        let mut claims = self.durable_turns.lock().unwrap();
+        let token = claims.get(session_id).cloned();
+        let tx = store.begin_immediate()?;
+        let foreign: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND (?2 IS NULL OR claim_token != ?2))",
+            rusqlite::params![session_id, token], |row| row.get(0),
+        )?;
+        if foreign {
+            return Err(anyhow!("The chat is busy in another process; try again."));
+        }
+        let result = action(store)?;
+        if let Some(token) = &token {
+            tx.execute(
+                "DELETE FROM chat_turn_leases WHERE chat_session_id = ?1 AND claim_token = ?2",
+                rusqlite::params![session_id, token],
+            )?;
+        }
+        tx.commit()?;
+        claims.remove(session_id);
+        Ok(result)
     }
 
     pub(crate) fn fence_copy_publication(
@@ -5129,13 +5154,16 @@ impl ChatHost {
     /// empty `chat.queued` only if there was something to clear.
     pub fn clear_queue(&self, session_id: &str) -> Result<()> {
         let _mutation = self.queue_persistence.lock().unwrap();
-        if self
+        let refresh_failed = self
             .queue_refresh_errors
             .lock()
             .unwrap()
-            .contains_key(session_id)
-        {
-            self.release_refresh_claim_if_idle(session_id)?;
+            .contains_key(session_id);
+        if refresh_failed {
+            let store = Store::open()?;
+            self.with_refresh_custody(session_id, &store, |store| {
+                store.delete_queued_chat_messages_for_session(session_id)
+            })?;
         }
         self.queue_dispatch_cancelled
             .lock()
@@ -5145,9 +5173,13 @@ impl ChatHost {
             .lock()
             .unwrap()
             .remove(session_id);
-        if let Err(error) = Store::open()
-            .and_then(|store| store.delete_queued_chat_messages_for_session(session_id))
-        {
+        let deleted = if refresh_failed {
+            Ok(())
+        } else {
+            Store::open()
+                .and_then(|store| store.delete_queued_chat_messages_for_session(session_id))
+        };
+        if let Err(error) = deleted {
             if !self
                 .queue_dispatch_in_flight
                 .lock()
@@ -5200,12 +5232,40 @@ impl ChatHost {
             .unwrap()
             .contains_key(session_id);
         if refresh_failed {
-            self.release_refresh_claim_if_idle(session_id)?;
+            let store = Store::open()?;
+            let removed = self.with_refresh_custody(session_id, &store, |store| {
+                self.refresh_persisted_queue_locked(session_id, store)?;
+                let present = self
+                    .queued
+                    .lock()
+                    .unwrap()
+                    .get(session_id)
+                    .is_some_and(|queue| queue.iter().any(|message| message.id == item_id));
+                if present {
+                    store.delete_queued_chat_message(item_id)?;
+                }
+                Ok(present)
+            })?;
+            {
+                let mut queued = self.queued.lock().unwrap();
+                if let Some(queue) = queued.get_mut(session_id) {
+                    if removed {
+                        queue.retain(|message| message.id != item_id);
+                    }
+                    if queue.is_empty() {
+                        queued.remove(session_id);
+                    }
+                }
+                if !queued.contains_key(session_id) {
+                    self.queue_refresh_errors.lock().unwrap().remove(session_id);
+                }
+            }
+            drop(_mutation);
+            self.emit_queued(session_id);
+            self.resume_persisted_queues();
+            return Ok(removed);
         }
         let store = Store::open()?;
-        if refresh_failed {
-            self.refresh_persisted_queue_locked(session_id, &store)?;
-        }
         let (removed, exhausted_head) = {
             let mut map = self.queued.lock().unwrap();
             let Some(q) = map.get_mut(session_id) else {
@@ -5290,16 +5350,18 @@ impl ChatHost {
             if !requested_front {
                 return Ok(false);
             }
-            self.release_refresh_claim_if_idle(session_id)?;
-            self.refresh_persisted_queue_locked(session_id, &store)?;
-            self.queue_refresh_errors.lock().unwrap().remove(session_id);
-            let is_front = self
-                .queued
-                .lock()
-                .unwrap()
-                .get(session_id)
-                .and_then(|queue| queue.front())
-                .is_some_and(|message| message.id == item_id);
+            let (is_front, empty) = self.with_refresh_custody(session_id, &store, |store| {
+                self.refresh_persisted_queue_locked(session_id, store)?;
+                let queued = self.queued.lock().unwrap();
+                let front = queued.get(session_id).and_then(|queue| queue.front());
+                Ok((
+                    front.is_some_and(|message| message.id == item_id),
+                    front.is_none(),
+                ))
+            })?;
+            if is_front || empty {
+                self.queue_refresh_errors.lock().unwrap().remove(session_id);
+            }
             drop(_mutation);
             self.emit_queued(session_id);
             self.resume_persisted_queues();
@@ -13880,6 +13942,12 @@ mod run_wakeup_tests {
             1
         );
         assert!(!store.chat_turn_leased("owner").unwrap());
+        host.clear_queue("owner").unwrap();
+        assert!(store
+            .list_queued_chat_messages_for_session("owner")
+            .unwrap()
+            .is_empty());
+        assert!(host.queued_items("owner").is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13935,6 +14003,110 @@ mod run_wakeup_tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_queue_recovery_respects_another_process_lease() {
+        use std::io::{BufRead, Write};
+        const HOLDER: &str = "ORX_TEST_FOREIGN_QUEUE_HOLDER";
+        if std::env::var_os(HOLDER).is_some() {
+            let store = Store::open().unwrap();
+            assert!(store
+                .claim_chat_turn("owner", "foreign-token", &[])
+                .unwrap());
+            println!("FOREIGN_LEASE_READY");
+            std::io::stdout().flush().unwrap();
+            let mut release = String::new();
+            std::io::stdin().read_line(&mut release).unwrap();
+            store.release_chat_turn("owner", "foreign-token").unwrap();
+            return;
+        }
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        store
+            .create_local_project(&crate::store::tests::local_project_fixture("p1"))
+            .unwrap();
+        session(&store, "owner");
+        let host = notice_host();
+        let mut copy = TurnGuard::claim_idle_for_copy(&host, "owner")
+            .await
+            .unwrap();
+        assert!(
+            host.send_message(
+                "owner",
+                "keep this".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_foreign".into()),
+                None
+            )
+            .await
+            .unwrap()
+            .queued
+        );
+        let item_id = host.queued_items("owner")[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let old_data_dir = std::env::var_os("ORX_DATA_DIR");
+        let unavailable = crate::config::test_home().join("not-a-directory");
+        std::fs::write(&unavailable, b"fixture").unwrap();
+        std::env::set_var("ORX_DATA_DIR", &unavailable);
+        copy.release().await;
+        match old_data_dir {
+            Some(value) => std::env::set_var("ORX_DATA_DIR", value),
+            None => std::env::remove_var("ORX_DATA_DIR"),
+        }
+        let old_token = host.durable_turns.lock().unwrap()["owner"].clone();
+        store.release_chat_turn("owner", &old_token).unwrap();
+        let mut child = crate::process::command(std::env::current_exe().unwrap())
+            .args(["--exact", "local::chat::run_wakeup_tests::blocked_queue_recovery_respects_another_process_lease", "--nocapture"])
+            .env(HOLDER, "1").env("ORX_DATA_DIR", crate::store::data_dir()).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(
+                output.read_line(&mut line).unwrap(),
+                0,
+                "lease holder exited before ready"
+            );
+            if line.contains("FOREIGN_LEASE_READY") {
+                break;
+            }
+        }
+        assert!(host.cancel_queued("owner", &item_id).is_err());
+        assert!(host.retry_queued("owner", &item_id).is_err());
+        assert!(host.clear_queue("owner").is_err());
+        assert_eq!(host.queued_items("owner")[0]["dispatchState"], "blocked");
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+        writeln!(child.stdin.as_mut().unwrap(), "release").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(host.cancel_queued("owner", &item_id).unwrap());
+        assert!(store
+            .list_queued_chat_messages_for_session("owner")
+            .unwrap()
+            .is_empty());
+        assert!(!store.chat_turn_leased("owner").unwrap());
+        host.queue_refresh_errors
+            .lock()
+            .unwrap()
+            .insert("owner".into(), "storage unavailable".into());
+        assert!(!host.cancel_queued("owner", &item_id).unwrap());
+        assert!(!host
+            .queue_refresh_errors
+            .lock()
+            .unwrap()
+            .contains_key("owner"));
     }
 
     #[tokio::test(flavor = "current_thread")]
