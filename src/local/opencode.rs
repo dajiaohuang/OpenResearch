@@ -433,6 +433,8 @@ pub struct AgentStatus {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uploaded_skills_stale: bool,
 }
 
 struct AgentChild {
@@ -448,6 +450,7 @@ struct AgentChild {
     binary: ResolvedBinary,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
+    uploaded_skills_snapshot: Option<[u8; 32]>,
 }
 
 impl AgentChild {
@@ -458,6 +461,7 @@ impl AgentChild {
             project_id: Some(self.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.model.clone(),
+            uploaded_skills_stale: false,
         }
     }
 }
@@ -484,6 +488,8 @@ async fn spawn_agent(
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
     };
+    let uploaded_skills_snapshot =
+        super::user_skills::session_uploads_snapshot(&repo, ".opencode/skills")?;
     // Best-effort: the playbook is the real guide; the shim just lets
     // opencode's skill tool surface `orx skill` too.
     if let Err(err) = crate::commands::install_skills::install_opencode_shim().await {
@@ -534,6 +540,7 @@ async fn spawn_agent(
         binary,
         endpoint,
         database,
+        uploaded_skills_snapshot: Some(uploaded_skills_snapshot),
     })
 }
 
@@ -964,9 +971,17 @@ impl AgentHost {
                     && agent.config == config
                     && matches!(agent.child.try_wait(), Ok(None))
                 {
-                    let status = agent.status();
+                    let mut status = agent.status();
                     let endpoint = agent.endpoint.clone();
+                    let loaded_snapshot = agent.uploaded_skills_snapshot;
                     drop(guard);
+                    let worktree = git::existing_session_worktree_path(project, session_id);
+                    let current_snapshot = super::user_skills::session_uploads_snapshot(
+                        &worktree,
+                        ".opencode/skills",
+                    )?;
+                    status.uploaded_skills_stale = loaded_snapshot != Some(current_snapshot)
+                        || super::user_skills::session_uploads_stale(&worktree, ".opencode/skills");
                     if let Some(model) = model {
                         verify_generation_models(&endpoint, model).await?;
                     }
@@ -1092,6 +1107,7 @@ impl AgentHost {
                 binary,
                 endpoint,
                 database,
+                uploaded_skills_snapshot: None,
             },
         );
     }
@@ -1244,6 +1260,7 @@ mod tests {
                 binary: binary.clone(),
                 endpoint,
                 database,
+                uploaded_skills_snapshot: None,
             },
         );
         let (progress, _) = tokio::sync::watch::channel(String::new());
@@ -1356,6 +1373,7 @@ mod tests {
                         2,
                     )
                     .unwrap(),
+                    uploaded_skills_snapshot: None,
                 },
             );
             let ensure = || {

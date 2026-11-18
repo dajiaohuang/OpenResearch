@@ -8,6 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
+import { confirmArtifactCopy } from "../confirmArtifactCopy";
 // The pinned Files home for the active chat session's private worktree — what
 // the agent is changing right now, before any run/commit exists. The Code tab
 // remains committed-state only.
@@ -24,7 +25,7 @@ import { ltr } from "../i18n";
 // commits) keep the last-good data with a small "refresh failed" note, mirroring
 // CodeTab's staleness handling.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { githubBranchUrl, type FileAction, type Project } from "../api";
 
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
@@ -38,7 +39,7 @@ import {
   fileContextMenuTarget,
   type FileContextMenuTarget,
 } from "./FileTreeActions";
-import { showAlert } from "./ui";
+import { Button, Input, showAlert } from "./ui";
 
 export type WorktreeView = CodeBrowserView;
 
@@ -78,7 +79,7 @@ export function WorktreeTab({
   const { listChatSessionsQuery, getSessionWorktreeQuery, getCodeTreeQuery } = useWorkspace().queries;
   const workspace = useWorkspace();
   const { queryClient, workspaceKey } = workspace;
-  const { revealFileInManager } = workspace.api;
+  const { publishCheckoutArtifact, revealFileInManager } = workspace.api;
 
   const projectId = project.id;
   const sessions = useQuery(listChatSessionsQuery(projectId));
@@ -92,6 +93,9 @@ export function WorktreeTab({
   const loading = worktree.isFetching || files.isFetching;
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [openPath, setOpenPath] = useState("");
+  const [publishingPath, setPublishingPath] = useState(false);
+  const openPathId = useId();
   const load = useCallback(() => {
     if (sessionId) void queryClient.invalidateQueries(getSessionWorktreeQuery(sessionId));
     void queryClient.invalidateQueries({ queryKey: workspaceKey("getCodeTree", projectId), predicate: (query) => !isImmutableQuery(query) });
@@ -133,6 +137,20 @@ export function WorktreeTab({
     const root = tree?.path ?? project.repoPath;
     copyFilePath(root, path);
   };
+  const publishPath = (path: string) => {
+    if (!sessionId || !path || publishingPath) return;
+    confirmArtifactCopy(showConfirmDialog, async () => {
+      setPublishingPath(true);
+      try {
+        const result = await publishCheckoutArtifact(projectId, sessionId, path);
+        showAlert(m.file_viewer_published_artifact({ name: ltr(result.path) }), "success");
+      } catch (error) {
+        showAlert(m.file_viewer_publish_artifact_failed({ error: ltr(error instanceof Error ? error.message : String(error)) }), "error");
+      } finally {
+        setPublishingPath(false);
+      }
+    });
+  };
   const reveal = async (path: string) => {
     try {
       await revealFileInManager(projectId, path, { sessionId });
@@ -158,6 +176,19 @@ export function WorktreeTab({
         refreshing={loading}
         onRefresh={load}
       />
+      {liveWorktree && view === "files" && (
+        <form className="flex flex-wrap gap-2 px-3 py-2 border-b border-b-border-variant" onSubmit={(event) => {
+          event.preventDefault();
+          const relativePath = openPath.trim().split("\\").join("/");
+          if (relativePath) openFile(relativePath, "keepOpen");
+        }}>
+          <label className="sr-only" htmlFor={openPathId}>{m.worktree_open_path_label()}</label>
+          <Input id={openPathId} className="min-w-0 flex-1" value={openPath}
+            onChange={(event) => setOpenPath(event.target.value)} placeholder={m.worktree_open_path_label()} />
+          <Button type="submit" disabled={!openPath.trim()}>{m.worktree_open_path_action()}</Button>
+          <Button type="button" disabled={!openPath.trim() || publishingPath} onClick={() => publishPath(openPath.trim().split("\\").join("/"))}>{m.worktree_copy_to_artifacts()}</Button>
+        </form>
+      )}
       {error && (wt || tree) && <CodeTabNote>{m.worktree_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
       {!tree || (sessionId && !wt) ? (
         <CodeTabBody>
@@ -230,6 +261,9 @@ export function WorktreeTab({
             : undefined}
           onDuplicate={canManageFiles
             ? () => manage(contextMenu.path, { action: "duplicate" })
+            : undefined}
+          onPublish={canManageFiles && sessionId
+            ? () => publishPath(contextMenu.path)
             : undefined}
           onCopyPath={() => copyPath(contextMenu.path)}
           onDelete={canManageFiles

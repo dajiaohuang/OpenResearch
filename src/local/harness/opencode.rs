@@ -950,6 +950,18 @@ async fn ensure_runtime(
         state.status = if result.is_ok() { "completed" } else { "error" }.into();
         state.error = result.as_ref().err().map(ToString::to_string);
     }
+    if result
+        .as_ref()
+        .is_ok_and(|status| status.uploaded_skills_stale)
+    {
+        let part = WirePart::tool(
+            "opencode-skills-stale",
+            "orx_skills_stale",
+            "completed",
+            None,
+        );
+        ctx.upsert_part(part);
+    }
     ctx.flush()?;
     result
 }

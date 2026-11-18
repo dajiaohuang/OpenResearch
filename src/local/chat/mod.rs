@@ -3184,6 +3184,7 @@ struct GateToken {
 
 enum TurnState {
     Reserved { turn_id: Option<String> },
+    Copying,
     Switching,
     Draining,
     Active(ActiveTurn),
@@ -3819,6 +3820,12 @@ impl Drop for SessionDeletionLease {
 }
 
 impl TurnGuard {
+    pub(crate) async fn claim_idle_for_copy(
+        host: &Arc<ChatHost>,
+        session_id: &str,
+    ) -> Option<Self> {
+        Self::claim_idle(host, session_id, TurnState::Copying).await
+    }
     fn adopt(host: &Arc<ChatHost>, session_id: &str) -> Self {
         Self {
             host: host.clone(),
@@ -3901,7 +3908,7 @@ impl TurnGuard {
         self.armed = false;
     }
 
-    async fn release(&mut self) {
+    pub(crate) async fn release(&mut self) {
         if !self.armed {
             return;
         }
@@ -3911,7 +3918,7 @@ impl TurnGuard {
             let mut turns = self.host.turns.lock().await;
             if !matches!(
                 turns.get(&self.session_id),
-                Some(TurnState::Reserved { .. } | TurnState::Switching)
+                Some(TurnState::Reserved { .. } | TurnState::Copying | TurnState::Switching)
             ) {
                 return;
             }
@@ -4542,6 +4549,7 @@ impl ChatHost {
 
     /// Stop admitting turns, including the next queued message of a turn that ends from here on.
     pub fn stop_admitting(&self) {
+        let _claims = self.durable_turns.lock().unwrap();
         self.exiting
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -4608,6 +4616,36 @@ impl ChatHost {
         }
     }
 
+    pub(crate) fn fence_copy_publication(
+        &self,
+        store: &Store,
+        session_id: &str,
+        install: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let claims = self.durable_turns.lock().unwrap();
+        let token = claims
+            .get(session_id)
+            .ok_or_else(|| anyhow!("Artifact copy lost its chat lease."))?;
+        if self.exiting.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!(
+                "OpenResearch is shutting down; copy the artifact again after restart."
+            ));
+        }
+        let tx = store.begin_immediate()?;
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND claim_token = ?2)",
+            rusqlite::params![session_id, token], |row| row.get(0),
+        )?;
+        if !held {
+            return Err(anyhow!("Artifact copy lost its chat lease; copy it again."));
+        }
+        install()?;
+        if let Err(error) = tx.rollback() {
+            eprintln!("Could not release the artifact publication lock: {error}");
+        }
+        Ok(())
+    }
+
     fn renew_turn_leases(&self) -> Vec<String> {
         let claims = self.durable_turns.lock().unwrap().clone();
         let Ok(store) = Store::open() else {
@@ -4631,6 +4669,18 @@ impl ChatHost {
             deleting: self.deleting_sessions.clone(),
             session_id: session_id.to_string(),
         })
+    }
+
+    pub(crate) async fn ensure_not_copying(&self, session_id: &str) -> Result<()> {
+        if matches!(
+            self.turns.lock().await.get(session_id),
+            Some(TurnState::Copying)
+        ) {
+            return Err(anyhow!(
+                "Wait for the artifact copy to finish before deleting this chat."
+            ));
+        }
+        Ok(())
     }
 
     /// The session's parked messages, oldest first — for the reload snapshot.
@@ -7307,6 +7357,10 @@ impl ChatHost {
                     None
                 }
                 TurnState::Draining => None,
+                TurnState::Copying => {
+                    *state = TurnState::Copying;
+                    return Ok(false);
+                }
                 TurnState::Switching => {
                     *state = TurnState::Switching;
                     return Ok(false);
@@ -8002,12 +8056,28 @@ impl ChatHost {
     }
 
     pub async fn delete_session(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let _deleting = self
-            .begin_session_delete(session_id)
-            .ok_or_else(|| anyhow!("session deletion is already in progress"))?;
-        for side_chat in Store::open()?.side_chats_of(session_id)? {
-            Box::pin(self.delete_session(&side_chat)).await?;
+        let store = Store::open()?;
+        let mut pending = vec![session_id.to_string()];
+        let mut sessions = Vec::new();
+        let mut _deletions = Vec::new();
+        while let Some(id) = pending.pop() {
+            _deletions.push(
+                self.begin_session_delete(&id)
+                    .ok_or_else(|| anyhow!("session deletion is already in progress"))?,
+            );
+            pending.extend(store.side_chats_of(&id)?);
+            sessions.push(id);
         }
+        for id in &sessions {
+            self.ensure_not_copying(id).await?;
+        }
+        for id in sessions.iter().rev() {
+            self.delete_session_guarded(id).await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_session_guarded(self: &Arc<Self>, session_id: &str) -> Result<()> {
         self.clear_queue(session_id)?;
         let _ = self.interrupt(session_id).await;
         // A live opencode serve child would keep running in (and lock) the
@@ -13488,6 +13558,109 @@ mod run_wakeup_tests {
         ))
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_reservation_is_scoped_and_releases_durable_lease() {
+        const CHILD: &str = "ORX_TEST_IDLE_RESERVATION";
+        if std::env::var_os(CHILD).is_none() {
+            let dir =
+                std::env::temp_dir().join(format!("orx-reservation-{}", uuid::Uuid::new_v4()));
+            let output = crate::process::command(std::env::current_exe().unwrap())
+                .args(["--exact", "local::chat::run_wakeup_tests::idle_reservation_is_scoped_and_releases_durable_lease", "--nocapture"])
+                .env(CHILD, "1")
+                .env("ORX_DATA_DIR", &dir)
+                .env("ORX_NO_TELEMETRY", "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let store = Store::open().unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "p1".into(),
+                name: "fixture".into(),
+                slug: "fixture".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: std::env::var("ORX_DATA_DIR").unwrap(),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        session(&store, "owner");
+        session(&store, "other");
+        let host = notice_host();
+        let mut owner =
+            TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                .await
+                .unwrap();
+        assert!(store.chat_turn_leased("owner").unwrap());
+        assert!(
+            TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                .await
+                .is_none()
+        );
+        let mut other =
+            TurnGuard::claim_idle(&host, "other", TurnState::Reserved { turn_id: None })
+                .await
+                .unwrap();
+        other.release().await;
+        assert!(!store.chat_turn_leased("other").unwrap());
+        let queued = host
+            .send_message(
+                "owner",
+                "arrived during copy".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_during_copy".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(queued.queued);
+        assert_eq!(host.queued_items("owner").len(), 1);
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+        // Prevent an actual agent launch: this verifies persistence and admission,
+        // not the separate dispatcher path after the reservation is released.
+        host.queue_dispatch_suppressed
+            .lock()
+            .unwrap()
+            .insert("owner".into());
+        owner.release().await;
+        assert!(!store.chat_turn_leased("owner").unwrap());
+        assert_eq!(host.queued_items("owner").len(), 1);
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+        host.clear_queue("owner").unwrap();
+        let mut again =
+            TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                .await
+                .unwrap();
+        again.release().await;
+    }
+
     fn notice_harness(store: &Store) {
         let launch = crate::local::acp::Definition {
             id: "acp:00000000-0000-4000-8000-000000000001".into(),
@@ -15326,6 +15499,54 @@ done
                 .unwrap());
             assert!(host.renew_turn_leases().is_empty());
         });
+    }
+
+    #[tokio::test]
+    async fn suppressed_queue_arrival_survives_reservation_release() {
+        let host = notice_host();
+        host.turns
+            .lock()
+            .await
+            .insert("owner".into(), TurnState::Reserved { turn_id: None });
+        host.queue_dispatch_suppressed
+            .lock()
+            .unwrap()
+            .insert("owner".into());
+        host.queued.lock().unwrap().insert(
+            "owner".into(),
+            VecDeque::from([QueuedMessage {
+                id: "q_1".into(),
+                client_turn_id: "ct_1".into(),
+                request_hash: "hash".into(),
+                text: "user arrived".into(),
+                transcript_text: None,
+                orx: Vec::new(),
+                overrides: TurnOverrides::default(),
+                images: Vec::new(),
+                annotations: Vec::new(),
+                dispatch_attempts: 0,
+                dispatch_error: None,
+                next_retry_at: None,
+            }]),
+        );
+        let mut guard = TurnGuard {
+            host: host.clone(),
+            session_id: "owner".into(),
+            armed: true,
+        };
+        guard.release().await;
+        assert!(!host.turns.lock().await.contains_key("owner"));
+        assert_eq!(
+            host.queued
+                .lock()
+                .unwrap()
+                .get("owner")
+                .unwrap()
+                .front()
+                .unwrap()
+                .text,
+            "user arrived"
+        );
     }
 
     #[test]

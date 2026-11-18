@@ -204,6 +204,557 @@ fn resolve_contained(base: &Path, rel_path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Copy one explicitly chosen checkout file to the artifact root without
+/// replacing an existing entry. The staging file is outside the artifact
+/// listing, and the final name appears only after the copy is complete.
+type PublishFence<'a> = dyn Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + 'a;
+
+#[cfg(test)]
+fn publish_checkout_file(checkout: &Path, rel_path: &str, artifacts: &Path) -> Result<PathBuf> {
+    publish_checkout_file_fenced(checkout, rel_path, artifacts, &|install| install())
+}
+
+pub(crate) fn publish_checkout_file_fenced(
+    checkout: &Path,
+    rel_path: &str,
+    artifacts: &Path,
+    fence: &PublishFence<'_>,
+) -> Result<PathBuf> {
+    if Path::new(rel_path).components().any(|part| {
+        part.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(".git")
+    }) {
+        return Err(anyhow!("cannot publish files under .git"));
+    }
+    let source = resolve_contained(checkout, rel_path)?;
+    let name = Path::new(rel_path)
+        .file_name()
+        .ok_or_else(|| anyhow!("invalid file name"))?;
+    let root = crate::paths::canonicalize(artifacts)?;
+    let metadata = std::fs::metadata(&source)?;
+    if metadata.is_dir() {
+        return publish_directory_fenced(&source, &root, name, fence);
+    }
+    if !metadata.is_file() {
+        return Err(anyhow!(
+            "only regular files and directories can be published"
+        ));
+    }
+    #[cfg(unix)]
+    let mut input = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&source)?
+    };
+    #[cfg(not(unix))]
+    let mut input = std::fs::File::open(&source)?;
+    if !input.metadata()?.is_file() {
+        return Err(anyhow!(
+            "only regular files and directories can be published"
+        ));
+    }
+    publish_reader_fenced(&mut input, &root, name, fence)
+}
+
+#[cfg(test)]
+fn publish_directory(source: &Path, root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
+    publish_directory_fenced(source, root, name, &|install| install())
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn publish_directory_fenced(
+    source: &Path,
+    root: &Path,
+    name: &std::ffi::OsStr,
+    fence: &PublishFence<'_>,
+) -> Result<PathBuf> {
+    fn copy_contents(source: &Path, destination: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink()
+                || entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(".git")
+            {
+                return Err(anyhow!("directory contains a link or .git entry"));
+            }
+            let target = destination.join(entry.file_name());
+            if kind.is_dir() {
+                std::fs::create_dir(&target)?;
+                copy_contents(&entry.path(), &target)?;
+            } else if kind.is_file() {
+                std::fs::copy(entry.path(), target)?;
+            } else {
+                return Err(anyhow!("directory contains a non-regular file"));
+            }
+        }
+        Ok(())
+    }
+    let parent = root
+        .parent()
+        .ok_or_else(|| anyhow!("artifact directory has no parent"))?;
+    let temp = parent.join(format!(".orx-publish-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&temp)?;
+    let dest = root.join(name);
+    let result = copy_contents(source, &temp).and_then(|()| {
+        fence(&mut || {
+            install_published_directory(&temp, &dest).map_err(|error| {
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                ) && std::fs::symlink_metadata(&dest).is_ok()
+                {
+                    std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "artifact name already exists",
+                    )
+                    .into()
+                } else {
+                    error.into()
+                }
+            })
+        })
+    });
+    if temp.exists() {
+        std::fs::remove_dir_all(&temp)?;
+    }
+    result?;
+    Ok(dest)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn publish_directory_fenced(
+    _source: &Path,
+    _root: &Path,
+    _name: &std::ffi::OsStr,
+    _fence: &PublishFence<'_>,
+) -> Result<PathBuf> {
+    Err(anyhow!(
+        "directory publishing is not available on this platform"
+    ))
+}
+
+#[cfg(windows)]
+fn install_published_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    install_published_file(source, destination)
+}
+
+#[cfg(target_os = "linux")]
+fn install_published_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+    let code = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_published_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+    let code = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(test)]
+fn publish_reader(
+    input: &mut impl std::io::Read,
+    root: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<PathBuf> {
+    publish_reader_fenced(input, root, name, &|install| install())
+}
+
+fn publish_reader_fenced(
+    input: &mut impl std::io::Read,
+    root: &Path,
+    name: &std::ffi::OsStr,
+    fence: &PublishFence<'_>,
+) -> Result<PathBuf> {
+    use std::io::Write as _;
+    let dest = root.join(name);
+    let parent = root
+        .parent()
+        .ok_or_else(|| anyhow!("artifact directory has no parent"))?;
+    let temp = parent.join(format!(".orx-publish-{}", uuid::Uuid::new_v4()));
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = (|| -> Result<()> {
+        std::io::copy(input, &mut output)?;
+        output.flush()?;
+        drop(output);
+        fence(&mut || {
+            if let Err(error) = install_published_file(&temp, &dest) {
+                // Some filesystems report a same-name directory as access denied
+                // rather than already-exists. Report a collision only when the
+                // destination can actually be observed after the failed move.
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                ) && std::fs::symlink_metadata(&dest).is_ok()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "artifact name already exists",
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+            Ok(())
+        })
+    })();
+    if let Err(error) = std::fs::remove_file(&temp) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "Could not remove temporary artifact copy {}: {error}",
+                temp.display()
+            );
+        }
+    }
+    result?;
+    Ok(dest)
+}
+
+#[cfg(windows)]
+fn install_published_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let from: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // No REPLACE_EXISTING and no COPY_ALLOWED: refuse existing destinations
+    // and cross-volume copies rather than expose an incomplete final file.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn install_published_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(source, destination)
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+
+    #[test]
+    fn published_file_keeps_bytes_staged_before_another_writer_changes_source() {
+        let root =
+            std::env::temp_dir().join(format!("orx-publish-change-{}", uuid::Uuid::new_v4()));
+        let checkout = root.join("checkout");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let source = checkout.join("result.txt");
+        std::fs::write(&source, b"before").unwrap();
+        let published =
+            publish_checkout_file_fenced(&checkout, "result.txt", &artifacts, &|install| {
+                std::fs::write(&source, b"after")?;
+                install()
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(source).unwrap(), b"after");
+        assert_eq!(std::fs::read(published).unwrap(), b"before");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_with_fifo_is_rejected_and_staging_removed() {
+        use std::os::unix::ffi::OsStrExt;
+        let root =
+            std::env::temp_dir().join(format!("orx-publish-dir-fifo-{}", uuid::Uuid::new_v4()));
+        let checkout = root.join("checkout");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(checkout.join("output")).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let fifo =
+            std::ffi::CString::new(checkout.join("output/pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(publish_checkout_file(&checkout, "output", &artifacts).is_err());
+        assert!(!artifacts.join("output").exists());
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".orx-publish-")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_rejects_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("orx-publish-fifo-{}", uuid::Uuid::new_v4()));
+        let checkout = root.join("checkout");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let fifo = std::ffi::CString::new(checkout.join("pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(publish_checkout_file(&checkout, "pipe", &artifacts).is_err());
+        assert!(!artifacts.join("pipe").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_publish_rejects_nested_junction() {
+        let root =
+            std::env::temp_dir().join(format!("orx-publish-junction-{}", uuid::Uuid::new_v4()));
+        let checkout = root.join("checkout");
+        let source = checkout.join("output");
+        let outside = root.join("outside");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(outside.join("data.txt"), b"outside").unwrap();
+        let junction = source.join("junction");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = publish_checkout_file(&checkout, "output", &artifacts);
+        assert!(result.is_err());
+        assert!(!artifacts.join("output").exists());
+        assert_eq!(std::fs::read(outside.join("data.txt")).unwrap(), b"outside");
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".orx-publish-")));
+        std::fs::remove_dir(&junction).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn concurrent_directory_publish_preserves_one_complete_tree() {
+        use std::sync::{Arc, Barrier};
+        let root =
+            std::env::temp_dir().join(format!("orx-publish-dir-race-{}", uuid::Uuid::new_v4()));
+        let artifacts = root.join("artifacts");
+        let first = root.join("first");
+        let second = root.join("second");
+        for dir in [&artifacts, &first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(first.join("payload"), vec![1; 4096]).unwrap();
+        std::fs::write(second.join("payload"), vec![2; 4096]).unwrap();
+        let start = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = [first, second]
+            .into_iter()
+            .map(|source| {
+                let artifacts = artifacts.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    publish_directory(&source, &artifacts, std::ffi::OsStr::new("result"))
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let error = results.into_iter().find_map(Result::err).unwrap();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        let payload = std::fs::read(artifacts.join("result/payload")).unwrap();
+        assert!(payload == vec![1; 4096] || payload == vec![2; 4096]);
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".orx-publish-")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_install_does_not_replace_existing_directory() {
+        let root = std::env::temp_dir().join(format!("orx-publish-dir-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        let destination = root.join("result");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("one"), b"first").unwrap();
+        std::fs::write(second.join("two"), b"second").unwrap();
+        install_published_file(&first, &destination).unwrap();
+        assert!(install_published_file(&second, &destination).is_err());
+        assert_eq!(std::fs::read(destination.join("one")).unwrap(), b"first");
+        assert_eq!(std::fs::read(second.join("two")).unwrap(), b"second");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publish_does_not_replace_the_winner() {
+        use std::sync::{Arc, Barrier};
+        let root = std::env::temp_dir().join(format!("orx-publish-race-{}", uuid::Uuid::new_v4()));
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let start = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = [b'1', b'2']
+            .into_iter()
+            .map(|byte| {
+                let artifacts = artifacts.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    publish_reader(
+                        &mut std::io::Cursor::new(vec![byte; 4096]),
+                        &artifacts,
+                        std::ffi::OsStr::new("result"),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let bytes = std::fs::read(artifacts.join("result")).unwrap();
+        assert!(bytes == vec![b'1'; 4096] || bytes == vec![b'2'; 4096]);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_in_progress_is_not_visible_as_an_artifact() {
+        struct ObservedReader {
+            artifacts: PathBuf,
+            consumed: bool,
+        }
+        impl std::io::Read for ObservedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert_eq!(std::fs::read_dir(&self.artifacts)?.count(), 0);
+                if self.consumed {
+                    return Ok(0);
+                }
+                buffer[..3].copy_from_slice(&[0, 255, 42]);
+                self.consumed = true;
+                Ok(3)
+            }
+        }
+        let root = std::env::temp_dir().join(format!("orx-publish-stage-{}", uuid::Uuid::new_v4()));
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut reader = ObservedReader {
+            artifacts: artifacts.clone(),
+            consumed: false,
+        };
+        let result =
+            publish_reader(&mut reader, &artifacts, std::ffi::OsStr::new("result.zip")).unwrap();
+        assert_eq!(std::fs::read(result).unwrap(), [0, 255, 42]);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        struct BrokenReader(bool);
+        impl std::io::Read for BrokenReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::other("synthetic read failure"));
+                }
+                self.0 = true;
+                buffer[..3].copy_from_slice(&[0, 255, 42]);
+                Ok(3)
+            }
+        }
+        assert!(publish_reader(
+            &mut BrokenReader(false),
+            &artifacts,
+            std::ffi::OsStr::new("failed.zip")
+        )
+        .is_err());
+        assert!(!artifacts.join("failed.zip").exists());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copies_binary_without_overwriting_or_allowing_traversal() {
+        let root = std::env::temp_dir().join(format!("orx-publish-test-{}", uuid::Uuid::new_v4()));
+        let checkout = root.join("checkout");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(checkout.join("figures")).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(checkout.join("figures/report.pdf"), [0, 1, 2, 255]).unwrap();
+        let dest = publish_checkout_file(&checkout, "figures/report.pdf", &artifacts).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), [0, 1, 2, 255]);
+        std::fs::write(checkout.join("figures/report.pdf"), [9]).unwrap();
+        assert!(publish_checkout_file(&checkout, "figures/report.pdf", &artifacts).is_err());
+        assert_eq!(std::fs::read(dest).unwrap(), [0, 1, 2, 255]);
+        std::fs::write(checkout.join("figures/directory"), b"source").unwrap();
+        std::fs::create_dir(artifacts.join("directory")).unwrap();
+        let error = publish_checkout_file(&checkout, "figures/directory", &artifacts).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(artifacts.join("directory").is_dir());
+        assert!(publish_checkout_file(&checkout, "../outside", &artifacts).is_err());
+        assert!(publish_checkout_file(&checkout, ".git/config", &artifacts).is_err());
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        {
+            let folder = publish_checkout_file(&checkout, "figures", &artifacts).unwrap();
+            assert_eq!(std::fs::read(folder.join("report.pdf")).unwrap(), [9]);
+            assert!(publish_checkout_file(&checkout, "figures", &artifacts).is_err());
+            std::fs::create_dir(checkout.join("figures/.git")).unwrap();
+            assert!(publish_checkout_file(&checkout, "figures", &artifacts).is_err());
+            assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".orx-publish-")));
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        assert!(publish_checkout_file(&checkout, "figures", &artifacts).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilePresentation {

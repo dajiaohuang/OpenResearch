@@ -59,7 +59,8 @@ import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
-import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
+import { confirmArtifactCopy } from "../confirmArtifactCopy";
+import { Button, IconButton, IconButtonLink, Spinner, Tooltip, showAlert } from "./ui";
 
 const NO_ARTIFACT_ENTRIES: ArtifactEntry[] = [];
 
@@ -212,6 +213,7 @@ export function FileViewer({
     projectFileUrl,
     openFileInEditor,
     revealFileInManager,
+    publishCheckoutArtifact,
   } = useWorkspace().api;
 
   const fileOptions = resolvedFileQuery(projectId, path, source ?? "repo", sessionId, gitRef);
@@ -251,6 +253,7 @@ export function FileViewer({
   const selectableContentRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const [copiedContents, setCopiedContents] = useState(false);
+  const [publishingArtifact, setPublishingArtifact] = useState(false);
   const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const scrollPositionRef = useRef(scrollPosition);
   const data = loaded?.file ?? null;
@@ -454,6 +457,21 @@ export function FileViewer({
     } catch {
       showAlert(m.file_viewer_copy_failed(), "error");
     }
+  };
+
+  const publishArtifact = () => {
+    if (!sessionId || publishingArtifact) return;
+    confirmArtifactCopy(workspace.dialogs.showConfirmDialog, async () => {
+      setPublishingArtifact(true);
+      try {
+        const result = await publishCheckoutArtifact(projectId, sessionId, filePath);
+        showAlert(m.file_viewer_published_artifact({ name: ltr(result.path) }), "success");
+      } catch (error) {
+        showAlert(m.file_viewer_publish_artifact_failed({ error: ltr(error instanceof Error ? error.message : String(error)) }), "error");
+      } finally {
+        setPublishingArtifact(false);
+      }
+    });
   };
 
   useHotkey(
@@ -707,6 +725,16 @@ export function FileViewer({
           >
             {copiedContents ? <Check size={14} /> : <Copy size={14} />}
           </IconButton>
+        )}
+        {loaded?.source === "checkout" && loaded.file.root === "worktree" && sessionId && !gitRef && !data?.notFound && !(editState && isDirtyFileBuffer(editState)) && (
+          <Tooltip interactive content={m.file_viewer_publish_artifact()}><IconButton
+            size="small"
+            aria-label={m.file_viewer_publish_artifact()}
+            disabled={publishingArtifact}
+            onClick={() => void publishArtifact()}
+          >
+            {publishingArtifact ? <Spinner /> : <FileOutput size={14} />}
+          </IconButton></Tooltip>
         )}
         {data != null && (
           <>

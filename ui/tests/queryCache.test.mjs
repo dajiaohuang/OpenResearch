@@ -357,6 +357,34 @@ test("write invalidation stays scoped and excludes immutable commit bodies", asy
   assert.equal(invalid(2), true);
 });
 
+test("publishing refreshes only the selected project's artifact listing", async () => {
+  const scope = workspace.workspaceScope();
+  const mine = [...scope, "getArtifacts", "p"];
+  const other = [...scope, "getArtifacts", "other"];
+  client.setQueryData(mine, { entries: [] });
+  client.setQueryData(other, { entries: [] });
+  invalidation.invalidateWrite("/api/projects/p/files/publish", scope);
+  await settle();
+  assert.equal(client.getQueryState(mine).isInvalidated, true);
+  assert.equal(client.getQueryState(other).isInvalidated, false);
+});
+
+test("publish sends the selected session and surfaces a name conflict", async () => {
+  const requests = [];
+  serve(async (path, init) => {
+    requests.push({ path, init });
+    return requests.length === 1
+      ? new Response(JSON.stringify({ path: "result.zip" }), { status: 200 })
+      : new Response("an artifact with that name already exists", { status: 409 });
+  });
+  const { api } = workspace;
+  assert.deepEqual(await api.publishCheckoutArtifact("p", "s", "output/result.zip"), { path: "result.zip" });
+  assert.equal(requests[0].path, "/api/projects/p/files/publish");
+  assert.equal(requests[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { sessionId: "s", path: "output/result.zip" });
+  await assert.rejects(api.publishCheckoutArtifact("p", "s", "output/result.zip"), /already exists/);
+});
+
 test("a settings write cancels a cold imperative read before it can cache old readiness", async (t) => {
   const pending = deferred();
   let signal;

@@ -790,6 +790,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
         .route(
+            "/api/projects/{id}/files/publish",
+            post(publish_checkout_artifact),
+        )
+        .route(
             "/api/projects/{id}/files/reveal",
             post(reveal_artifact_file),
         )
@@ -3044,6 +3048,13 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
                 .begin_session_delete(&session.id)
                 .ok_or_else(|| bad_request("a chat session deletion is already in progress"))?,
         );
+    }
+    for session in &sessions {
+        state
+            .chat
+            .ensure_not_copying(&session.id)
+            .await
+            .map_err(|error| bad_request(error.to_string()))?;
     }
     for session in &sessions {
         state.chat.clear_queue(&session.id)?;
@@ -5324,6 +5335,105 @@ async fn absolute_raw_file(
 }
 
 // --- project artifacts ----------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishCheckoutArtifactReq {
+    session_id: String,
+    path: String,
+}
+
+async fn publish_while_idle<F>(chat: Arc<ChatHost>, session_id: String, operation: F) -> ApiResult
+where
+    F: std::future::Future<Output = ApiResult> + Send + 'static,
+{
+    // A disconnected client must not release the lease while copying continues.
+    tokio::spawn(async move {
+        let mut guard = local::chat::TurnGuard::claim_idle_for_copy(&chat, &session_id)
+            .await
+            .ok_or_else(|| {
+                bad_request("Wait for the chat and queued messages to finish before publishing.")
+            })?;
+        let result = operation.await;
+        guard.release().await;
+        result
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("publish task failed: {error}")))?
+}
+
+/// Publish an explicitly selected live session file without replacing an
+/// existing artifact. Never fall back to the hub clone if the worktree is gone.
+async fn publish_checkout_artifact(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PublishCheckoutArtifactReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let session_id = req.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err(bad_request("session is required"));
+    }
+    let chat = state.chat.clone();
+    publish_while_idle(
+        chat,
+        session_id,
+        blocking_api(move || {
+            let _admission = state
+                .project_lifecycle
+                .admit(&id)
+                .ok_or_else(|| bad_request("project deletion is in progress"))?;
+            reject_if_moving(&state)?;
+            let session_id = req.session_id.trim();
+            if session_id.is_empty() {
+                return Err(bad_request("session is required"));
+            }
+            let (rel, _) = validated_project_file_path(&req.path)?;
+            let store = Store::open()?;
+            if !store
+                .list_queued_chat_messages_for_session(session_id)?
+                .is_empty()
+            {
+                return Err(bad_request(
+                    "Wait for queued messages to finish before publishing.",
+                ));
+            }
+            let project = store
+                .get_local_project(&id)?
+                .ok_or_else(|| not_found("project"))?;
+            let (root, kind) = resolve_checkout_root(&store, &project, Some(session_id))?;
+            if kind != "worktree" {
+                return Err(bad_request("session worktree is unavailable"));
+            }
+            let artifacts = local::files::ensure_dir(&project)?;
+            let dest =
+                local::files::publish_checkout_file_fenced(&root, &rel, &artifacts, &|install| {
+                    state
+                        .chat
+                        .fence_copy_publication(&store, session_id, install)
+                })
+                .map_err(|error| {
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+                    {
+                        ApiError(
+                            StatusCode::CONFLICT,
+                            "an artifact with that name already exists".into(),
+                        )
+                    } else {
+                        ApiError::from(error)
+                    }
+                })?;
+            let name = dest
+                .file_name()
+                .ok_or_else(|| bad_request("invalid artifact name"))?
+                .to_string_lossy();
+            Ok(Json(json!({ "path": name })))
+        }),
+    )
+    .await
+}
 
 /// Listing of the project's artifacts dir — the filesystem is the source of
 /// truth; this scans it fresh on every call (and creates it if missing).
@@ -11457,6 +11567,446 @@ mod tests {
             .env_descriptions()
             .unwrap()
             .contains_key(&key));
+    }
+
+    // A child process keeps ORX_DATA_DIR isolated from the rest of the test
+    // suite, including tests that read the process-wide environment.
+    #[tokio::test]
+    async fn publish_artifact_respects_session_and_existing_files() {
+        const CHILD: &str = "ORX_PUBLISH_ARTIFACT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let data =
+                std::env::temp_dir().join(format!("orx-publish-api-{}", uuid::Uuid::new_v4()));
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::up::tests::publish_artifact_respects_session_and_existing_files",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ORX_DATA_DIR", &data)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "child failed: {}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed"),
+                "child test did not run: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+            return;
+        }
+        let data = crate::store::data_dir();
+        let repo = data.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = Store::open().unwrap();
+        let project = local::model::LocalProject {
+            id: "p".into(),
+            name: "Project".into(),
+            slug: "project".into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: repo.to_string_lossy().into_owned(),
+            run_command: None,
+            paper_id: None,
+            icon: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_local_project(&project).unwrap();
+        let session = StoredChatSession {
+            profile_id: None,
+            id: "s".into(),
+            project_id: "p".into(),
+            harness: "codex".into(),
+            native_session_id: None,
+            native_fork_at: None,
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            autonomy: None,
+            active_leaf_id: None,
+            side_parent_session_id: None,
+            side_parent_leaf_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        let mut missing_worktree = session.clone();
+        missing_worktree.id = "missing".into();
+        store.create_chat_session(&missing_worktree).unwrap();
+        let mut other_project = project.clone();
+        other_project.id = "p2".into();
+        other_project.slug = "other-project".into();
+        store.create_local_project(&other_project).unwrap();
+        let mut other_session = session.clone();
+        other_session.id = "other".into();
+        other_session.project_id = "p2".into();
+        store.create_chat_session(&other_session).unwrap();
+        let worktree = local::git::session_worktree_path("p", "s");
+        std::fs::create_dir_all(worktree.join("output")).unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&worktree)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(worktree.join(".gitignore"), "output/\n").unwrap();
+        std::fs::write(worktree.join("output/result.zip"), [0, 255, 42]).unwrap();
+        assert!(!local::git::list_worktree_files(&worktree)
+            .unwrap()
+            .iter()
+            .any(|p| p == "output/result.zip"));
+        let agent = Arc::new(AgentHost::new(None));
+        let codex = Arc::new(local::codex::CodexHost::new());
+        let claude = Arc::new(local::claude::ClaudeHost::new());
+        let state = AppState {
+            agent: agent.clone(),
+            chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
+            claude,
+            harnesses: Default::default(),
+            project_lifecycle: Default::default(),
+            project_creation_lock: Default::default(),
+            operations: Default::default(),
+            publication_locks: Default::default(),
+            harness_fill_in_flight: Default::default(),
+            claude_catalog_queue: Default::default(),
+            data_dir_move_in_progress: Default::default(),
+            data_dir_gate: Default::default(),
+            remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+            remote_instance_id: None,
+            stopping: Default::default(),
+            dashboard_lock: Default::default(),
+            restart: Default::default(),
+            reopen: Default::default(),
+            trackio: Default::default(),
+            opencode_signins: Default::default(),
+        };
+        let admission = state.project_lifecycle.admit("p").unwrap();
+        let error = delete_project_inner(state.clone(), "p".into(), DeleteProjectQuery::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(store.get_local_project("p").unwrap().is_some());
+        drop(admission);
+        let deletion = state.project_lifecycle.begin_delete("p").unwrap();
+        let error = open_side_chat(State(state.clone()), Path("s".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(store.side_chats_of("s").unwrap().is_empty());
+        drop(deletion);
+        let request = |session_id: &str| PublishCheckoutArtifactReq {
+            session_id: session_id.into(),
+            path: "output/result.zip".into(),
+        };
+        let error = publish_checkout_artifact(
+            State(state.clone()),
+            Path("p".into()),
+            Json(request("other")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        assert!(!local::files::files_dir(&project)
+            .join("result.zip")
+            .exists());
+        assert!(!store.chat_turn_leased("other").unwrap());
+        let mut busy = local::chat::TurnGuard::claim_idle_for_copy(&state.chat, "s")
+            .await
+            .unwrap();
+        assert!(!state.chat.interrupt("s").await.unwrap());
+        assert!(store.chat_turn_leased("s").unwrap());
+        let competing = rusqlite::Connection::open(store.data_dir().join("orx.db")).unwrap();
+        competing.busy_timeout(std::time::Duration::ZERO).unwrap();
+        state
+            .chat
+            .fence_copy_publication(&store, "s", &mut || {
+                let error = competing
+                    .execute(
+                        "DELETE FROM chat_turn_leases WHERE chat_session_id = ?1",
+                        ["s"],
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy)
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert!(state.chat.delete_session("s").await.is_err());
+        assert!(store.get_chat_session("s").unwrap().is_some());
+        let error =
+            publish_checkout_artifact(State(state.clone()), Path("p".into()), Json(request("s")))
+                .await
+                .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(!local::files::files_dir(&project)
+            .join("result.zip")
+            .exists());
+        busy.release().await;
+        for id in ["side-a", "side-b"] {
+            let mut side = session.clone();
+            side.id = id.into();
+            side.side_parent_session_id = Some("s".into());
+            store.create_chat_session(&side).unwrap();
+        }
+        let mut side_copy = local::chat::TurnGuard::claim_idle_for_copy(&state.chat, "side-b")
+            .await
+            .unwrap();
+        assert!(state.chat.delete_session("s").await.is_err());
+        for id in ["s", "side-a", "side-b"] {
+            assert!(store.get_chat_session(id).unwrap().is_some());
+        }
+        side_copy.release().await;
+        let mut lost = local::chat::TurnGuard::claim_idle_for_copy(&state.chat, "s")
+            .await
+            .unwrap();
+        let tx = store.begin_immediate().unwrap();
+        tx.execute(
+            "DELETE FROM chat_turn_leases WHERE chat_session_id = ?1",
+            ["s"],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let artifacts = local::files::ensure_dir(&project).unwrap();
+        let result = local::files::publish_checkout_file_fenced(
+            &worktree,
+            "output/result.zip",
+            &artifacts,
+            &|install| state.chat.fence_copy_publication(&store, "s", install),
+        );
+        assert!(result.is_err());
+        assert!(!artifacts.join("result.zip").exists());
+        let directory = local::files::publish_checkout_file_fenced(
+            &worktree,
+            "output",
+            &artifacts,
+            &|install| state.chat.fence_copy_publication(&store, "s", install),
+        );
+        assert!(directory.is_err());
+        assert!(!artifacts.join("output").exists());
+        assert!(!std::fs::read_dir(artifacts.parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".orx-publish-")
+            }));
+        lost.release().await;
+        store
+            .insert_queued_chat_message(&crate::store::StoredQueuedChatMessage {
+                id: "q_persisted".into(),
+                session_id: "s".into(),
+                client_turn_id: "ct_persisted".into(),
+                request_hash: "synthetic".into(),
+                payload_json: "{}".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        let error =
+            publish_checkout_artifact(State(state.clone()), Path("p".into()), Json(request("s")))
+                .await
+                .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(!local::files::files_dir(&project)
+            .join("result.zip")
+            .exists());
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("s")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store.chat_turn_leased("s").unwrap());
+        store.delete_queued_chat_message("q_persisted").unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let chat = state.chat.clone();
+        let caller = tokio::spawn(async move {
+            publish_while_idle(chat, "s".into(), async move {
+                let _ = started_tx.send(());
+                let _ = finish_rx.await;
+                Ok(Json(json!({"ok": true})))
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(state.chat.is_busy("s").await);
+        assert!(Store::open().unwrap().chat_turn_leased("s").unwrap());
+        finish_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.chat.is_busy("s").await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!Store::open().unwrap().chat_turn_leased("s").unwrap());
+        use tower::ServiceExt as _;
+        let app = Router::new()
+            .route(
+                "/api/projects/{id}/files/publish",
+                post(publish_checkout_artifact),
+            )
+            .route("/api/projects/{id}/file", get(project_file))
+            .with_state(state.clone());
+        if std::env::var_os("ORX_PUBLISH_LIVE_TEST").is_some() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:5188")
+                .await
+                .unwrap();
+            eprintln!("PUBLISH_FIXTURE_READY {}", data.display());
+            axum::serve(listener, app).await.unwrap();
+            return;
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/p/files/publish")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"sessionId":"s","path":"output/result.zip"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["path"], "result.zip");
+        assert_eq!(
+            std::fs::read(local::files::files_dir(&project).join("result.zip")).unwrap(),
+            [0, 255, 42]
+        );
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        {
+            std::fs::create_dir_all(worktree.join("output/folder/nested")).unwrap();
+            std::fs::write(worktree.join("output/folder/nested/data.bin"), [0, 255, 42]).unwrap();
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/projects/p/files/publish")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            r#"{"sessionId":"s","path":"output/folder"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                std::fs::read(local::files::files_dir(&project).join("folder/nested/data.bin"))
+                    .unwrap(),
+                [0, 255, 42]
+            );
+            let duplicate = publish_checkout_artifact(
+                State(state.clone()),
+                Path("p".into()),
+                Json(PublishCheckoutArtifactReq {
+                    session_id: "s".into(),
+                    path: "output/folder".into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(duplicate.0, StatusCode::CONFLICT);
+        }
+        let err =
+            publish_checkout_artifact(State(state.clone()), Path("p".into()), Json(request("s")))
+                .await
+                .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        std::fs::write(worktree.join("output/occupied"), b"source").unwrap();
+        std::fs::create_dir(local::files::files_dir(&project).join("occupied")).unwrap();
+        let err = publish_checkout_artifact(
+            State(state.clone()),
+            Path("p".into()),
+            Json(PublishCheckoutArtifactReq {
+                session_id: "s".into(),
+                path: "output/occupied".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(local::files::files_dir(&project).join("occupied").is_dir());
+        let err = publish_checkout_artifact(
+            State(state.clone()),
+            Path("p".into()),
+            Json(request("missing")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let err = publish_checkout_artifact(
+            State(state.clone()),
+            Path("p".into()),
+            Json(request("unknown")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        let mut delete_root = session.clone();
+        delete_root.id = "delete-root".into();
+        store.create_chat_session(&delete_root).unwrap();
+        let mut delete_child = session.clone();
+        delete_child.id = "delete-child".into();
+        delete_child.side_parent_session_id = Some("delete-root".into());
+        store.create_chat_session(&delete_child).unwrap();
+        state.chat.delete_session("delete-root").await.unwrap();
+        assert!(store.get_chat_session("delete-root").unwrap().is_none());
+        assert!(store.get_chat_session("delete-child").unwrap().is_none());
+        let mut stopping_copy = local::chat::TurnGuard::claim_idle_for_copy(&state.chat, "s")
+            .await
+            .unwrap();
+        state.chat.stop_admitting();
+        std::fs::write(worktree.join("output/shutdown.bin"), b"copy").unwrap();
+        let stopped = local::files::publish_checkout_file_fenced(
+            &worktree,
+            "output/shutdown.bin",
+            &artifacts,
+            &|install| state.chat.fence_copy_publication(&store, "s", install),
+        );
+        assert!(stopped.is_err());
+        assert!(!artifacts.join("shutdown.bin").exists());
+        assert!(!std::fs::read_dir(artifacts.parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".orx-publish-")
+            }));
+        stopping_copy.release().await;
     }
 
     async fn event_text(events: Vec<Event>) -> String {

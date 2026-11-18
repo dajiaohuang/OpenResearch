@@ -106,6 +106,7 @@ export function FileContextMenu({
   onOpen,
   onRename,
   onDuplicate,
+  onPublish,
   onCopyPath,
   onReveal,
   onDelete,
@@ -115,6 +116,7 @@ export function FileContextMenu({
   onOpen: () => void;
   onRename?: () => void;
   onDuplicate?: () => void;
+  onPublish?: () => void;
   onCopyPath: () => void;
   onReveal?: () => void;
   onDelete?: () => void;
@@ -164,6 +166,7 @@ export function FileContextMenu({
               {onReveal && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onReveal}>{revealLabel}</Menu.Item>}
               {onRename && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>}
               {onDuplicate && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onDuplicate}>{m.file_tree_duplicate()}</Menu.Item>}
+              {onPublish && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onPublish}>{m.worktree_copy_to_artifacts()}</Menu.Item>}
               <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onCopyPath}>{m.artifacts_copy_path()}</Menu.Item>
               {onDelete && <Menu.Item nativeButton render={<MenuItem size="compact" danger className="data-highlighted:bg-surface" />} onClick={onDelete}>{m.chat_panel_delete()}</Menu.Item>}
             </Menu.Popup>

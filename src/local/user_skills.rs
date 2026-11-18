@@ -965,6 +965,84 @@ pub fn write_into_session(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
     write_into_session_in(&root(), worktree, skills_dir_rel)
 }
 
+/// Whether the managed uploaded-skill files differ from their current sources.
+/// Project-owned name collisions are deliberately excluded, just as they are
+/// when writing a session. This compares files, not a harness's in-memory cache.
+pub fn session_uploads_stale(worktree: &Path, skills_dir_rel: &str) -> bool {
+    session_uploads_stale_in(&root(), worktree, skills_dir_rel)
+}
+
+/// Fingerprint the managed session copies, including supporting-file content.
+pub fn session_uploads_snapshot(worktree: &Path, skills_dir_rel: &str) -> Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    fn visit(path: &Path, digest: &mut Sha256) -> Result<()> {
+        let kind = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                digest.update(b"missing");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if kind.is_symlink() {
+            return Err(anyhow!("managed skill contains a link"));
+        }
+        if kind.is_dir() {
+            digest.update(b"directory");
+            let mut entries = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                digest.update((name.len() as u64).to_le_bytes());
+                digest.update(name.as_bytes());
+                visit(&entry.path(), digest)?;
+            }
+        } else if kind.is_file() {
+            digest.update(b"file");
+            let data = fs::read(path)?;
+            digest.update((data.len() as u64).to_le_bytes());
+            digest.update(data);
+        } else {
+            return Err(anyhow!("managed skill contains a non-regular file"));
+        }
+        Ok(())
+    }
+    let base = worktree.join(skills_dir_rel);
+    let manifest = base.join(MANAGED_MANIFEST);
+    let content = match fs::read_to_string(manifest) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut names: Vec<_> = content.lines().filter(|name| is_valid_slug(name)).collect();
+    names.sort_unstable();
+    let mut digest = Sha256::new();
+    for name in names {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        visit(&base.join(name), &mut digest)?;
+    }
+    Ok(digest.finalize().into())
+}
+
+fn session_uploads_stale_in(root: &Path, worktree: &Path, skills_dir_rel: &str) -> bool {
+    let base = worktree.join(skills_dir_rel);
+    let previous = previously_managed(&base).unwrap_or_default();
+    let sources = source_dirs(root, &[]);
+    for (name, src) in &sources {
+        let dest = base.join(name);
+        if dest.exists() && !previous.contains(name) {
+            continue;
+        }
+        if !dest_matches_source(src, tally_all(src), &dest) {
+            return true;
+        }
+    }
+    previous
+        .iter()
+        .any(|name| !sources.iter().any(|(source, _)| source == name))
+}
+
 fn write_into_session_in(root: &Path, worktree: &Path, skills_dir_rel: &str) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
     let previous = previously_managed(&base).unwrap_or_default();
@@ -2091,6 +2169,62 @@ mod tests {
     }
 
     #[test]
+    fn session_uploads_stale_detects_add_edit_delete_and_ignores_project_collision() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".opencode/skills";
+        assert!(!session_uploads_stale_in(&root, &wt, rel));
+        save_skill_md_in(&root, skill_md_desc("freshness", "Original").as_bytes()).unwrap();
+        assert!(session_uploads_stale_in(&root, &wt, rel));
+        write_into_session_in(&root, &wt, rel).unwrap();
+        assert!(!session_uploads_stale_in(&root, &wt, rel));
+        save_skill_md_in(&root, skill_md_desc("freshness", "Changed").as_bytes()).unwrap();
+        assert!(session_uploads_stale_in(&root, &wt, rel));
+        write_into_session_in(&root, &wt, rel).unwrap();
+        delete_in(&root, "freshness").unwrap();
+        assert!(session_uploads_stale_in(&root, &wt, rel));
+        write_into_session_in(&root, &wt, rel).unwrap();
+        let project_skill = wt.join(rel).join("project-owned");
+        fs::create_dir_all(&project_skill).unwrap();
+        fs::write(project_skill.join("SKILL.md"), skill_md("project-owned")).unwrap();
+        save_skill_md_in(&root, skill_md("project-owned").as_bytes()).unwrap();
+        assert!(!session_uploads_stale_in(&root, &wt, rel));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn session_snapshot_changes_when_another_chat_refreshes_the_worktree() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".opencode/skills";
+        save_skill_md_in(&root, skill_md_desc("freshness", "Original").as_bytes()).unwrap();
+        write_into_session_in(&root, &wt, rel).unwrap();
+        let loaded = session_uploads_snapshot(&wt, rel).unwrap();
+        save_skill_md_in(&root, skill_md_desc("freshness", "Modified").as_bytes()).unwrap();
+        write_into_session_in(&root, &wt, rel).unwrap();
+        assert!(!session_uploads_stale_in(&root, &wt, rel));
+        assert_ne!(loaded, session_uploads_snapshot(&wt, rel).unwrap());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn session_snapshot_detects_removed_managed_skill() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".opencode/skills";
+        save_skill_md_in(&root, skill_md("freshness").as_bytes()).unwrap();
+        write_into_session_in(&root, &wt, rel).unwrap();
+        let loaded = session_uploads_snapshot(&wt, rel).unwrap();
+        fs::remove_dir_all(wt.join(rel).join("freshness")).unwrap();
+        assert_ne!(loaded, session_uploads_snapshot(&wt, rel).unwrap());
+        assert!(session_uploads_stale_in(&root, &wt, rel));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
     fn project_scoped_skills_migrate_into_the_store() {
         let root = temp_root();
         save_skill_md_in(&root, skill_md_desc("dup", "GLOBAL").as_bytes()).unwrap();
@@ -2408,6 +2542,52 @@ mod tests {
         .contains("unavailable"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn slash_selection_uses_current_upload_when_session_copy_is_stale() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".agents/skills";
+        save_skill_md_in(
+            &root,
+            skill_md_desc("freshness", "Original content").as_bytes(),
+        )
+        .unwrap();
+        write_into_session_in(&root, &wt, rel).unwrap();
+        let session_file = wt.join(rel).join("freshness/SKILL.md");
+        let source_file = store_dir(&root).join("freshness").join("SKILL.md");
+        let selection = || {
+            instructions_selected_in(
+                &root,
+                &[],
+                "freshness",
+                SkillSelection::Auto,
+                Some(&session_file),
+                None,
+            )
+            .unwrap()
+        };
+        assert!(selection().contains(&session_file.display().to_string()));
+        save_skill_md_in(
+            &root,
+            skill_md_desc("freshness", "Updated content").as_bytes(),
+        )
+        .unwrap();
+        let selected = selection();
+        assert!(
+            selected.contains(&source_file.display().to_string()),
+            "selected={selected}; expected={}",
+            source_file.display()
+        );
+        assert!(fs::read_to_string(&session_file)
+            .unwrap()
+            .contains("Original content"));
+        assert!(fs::read_to_string(&source_file)
+            .unwrap()
+            .contains("Updated content"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
     }
 
     #[cfg(unix)]

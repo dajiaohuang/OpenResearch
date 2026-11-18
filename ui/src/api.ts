@@ -2862,6 +2862,9 @@ export function createApi(
   const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
     patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
 
+  const publishCheckoutArtifact = (projectId: string, sessionId: string, path: string) =>
+    post<{ path: string }>(`/api/projects/${projectId}/files/publish`, { sessionId, path });
+
   /** Reveal an artifact file or folder in the OS file manager on the machine
    * running `orx up`. */
   const revealArtifactInManager = (projectId: string, path: string) =>
@@ -3448,6 +3451,7 @@ export function createApi(
     getArtifacts,
     deleteArtifact,
     manageArtifactFile,
+    publishCheckoutArtifact,
     revealArtifactInManager,
     getArtifactFileText,
     getArtifactFileMetadata,

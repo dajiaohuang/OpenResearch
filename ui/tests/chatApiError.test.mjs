@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import { act, createElement } from "react";
 import { Message } from "../src/components/ChatPanel.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { autoDir } from "../src/i18n.ts";
-import { render } from "./render.mjs";
+import { render, settle } from "./render.mjs";
 
 const renderMessage = async (parts, id = "msg-1") => (await render(createElement(Message, {
   message: { id, role: "assistant", parts, createdAt: 0, completedAt: 1000 },
@@ -24,6 +24,17 @@ const recovery = {
   id: "turn-recovery", type: "tool", tool: "error",
   state: { status: "error", error: detail, input: { turnId: "turn-1", errorKind: "claude_terminal", recoveryAction: "continue" } },
 };
+
+test("outdated uploaded skills stay visible between collapsed tool groups", async () => {
+  const warning = { id: "opencode-skills-stale", type: "tool", tool: "orx_skills_stale", state: { status: "completed" } };
+  const html = await renderMessage([bash, { ...bash, id: "tool-2" }, warning, { ...bash, id: "tool-3" }, { id: "answer", type: "text", text: "Done." }]);
+  const status = html.querySelector('[role="status"]');
+  assert.ok(status);
+  assert.equal(status.textContent, m.chat_uploaded_skills_stale());
+  await act(async () => html.querySelector("[data-work-toggle]").click());
+  await settle();
+  assert.equal(count(html, m.chat_uploaded_skills_stale()), 1);
+});
 
 test("a full message presents one nonfatal transport status with details and recovery", async () => {
   const html = await renderMessage([bash, apiError, recovery]);

@@ -4165,6 +4165,7 @@ function AssistantTurn({ messages, response, options }: {
     return () => window.clearInterval(timer);
   }, [streaming, message.completedAt, work.length]);
   if (work.length === 0) return <>{renderParts(answer, answerOptions)}</>;
+  const skillWarnings = work.flatMap((turn) => turn.parts.filter((part) => part.type === "tool" && part.tool === "orx_skills_stale"));
   const elapsed = messages.reduce<number | null>((total, turn) => {
     const end = turn.completedAt ?? (streaming && turn.id === message.id ? Date.now() : null);
     return end === null ? total : (total ?? 0) + Math.max(0, end - turn.createdAt);
@@ -4178,6 +4179,7 @@ function AssistantTurn({ messages, response, options }: {
   const openFigure = (path: string, intent: TabOpenIntent) => options.onOpenFile?.(`artifacts/${path}`, undefined, undefined, undefined, intent);
   return (
     <>
+      {skillWarnings.length > 0 && <div role="status" className="my-2 text-sm text-subtext">{m.chat_uploaded_skills_stale()}</div>}
       <div className="turn-work mb-4">
         <button
           type="button"
@@ -4204,7 +4206,7 @@ function AssistantTurn({ messages, response, options }: {
           <div className="tool-group-disclosure-inner">
             <div className="turn-work-content flex flex-col gap-4 pt-4">
               {hasOpened && work.map((turn) => (
-                <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
+                <div key={turn.id}>{renderParts(turn.parts.filter((part) => !(part.type === "tool" && part.tool === "orx_skills_stale")), { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
               ))}
               {hasOpened && projectId && figures.length > 0 && (
                 <FigureReveal
@@ -4361,6 +4363,11 @@ function renderParts(
     // resolved permission card. Without this, each invisible part splits
     // consecutive tools into single-row groups.
     if (!partIsVisible(part, activePermissionId)) continue;
+    if (part.type === "tool" && part.tool === "orx_skills_stale") {
+      flushTools();
+      rendered.push(<div key={part.id} role="status" className="my-2 text-sm text-subtext">{m.chat_uploaded_skills_stale()}</div>);
+      continue;
+    }
     if (part.type === "tool" && part.tool === "api_error") {
       flushTools();
       rendered.push(<TurnStatusRow key={part.id} part={part} busy={false} recovering={false} temporaryApiError />);
