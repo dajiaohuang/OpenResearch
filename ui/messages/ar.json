@@ -1,4 +1,5 @@
 {
+  "file_tree_location_preview_unverified": "أغلق معاينة الملف لاستخدام موقعه؛ لا يمكن التحقق من المصدر المعروض.",
   "file_tree_location_unavailable": "موقع الملف غير متاح. أعد فتح الملف وحاول مجدداً.",
   "file_tree_location_historical": "يشير هذا المرجع إلى إصدار سابق بلا موقع متحقق منه على القرص.",
   "workspace_active_experiments": "التجارب النشطة",

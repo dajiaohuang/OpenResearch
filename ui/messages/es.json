@@ -1,4 +1,5 @@
 {
+  "file_tree_location_preview_unverified": "Cierra la vista previa para usar la ubicación; no se puede verificar la fuente mostrada.",
   "file_tree_location_unavailable": "La ubicación del archivo no está disponible. Vuelve a abrirlo e inténtalo de nuevo.",
   "file_tree_location_historical": "Esta referencia es una versión histórica y no tiene una ubicación verificada en disco.",
   "workspace_active_experiments": "Experimentos activos",

@@ -43,6 +43,9 @@ export function FileChip({ path, line, exp, onOpenFile, children }: {
   const [location, setLocation] = useState<{ path: string; source: "checkout" | "artifact" | "absolute"; sessionId?: string; root?: string; expectedPath: string } | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const sequence = useRef(0);
+  const previewKey = useRef<readonly unknown[] | null>(null);
+  const previewIsOpen = () => previewKey.current != null &&
+    (workspace.queryClient.getQueryCache().find({ queryKey: previewKey.current, exact: true })?.getObserversCount() ?? 0) > 0;
   const name = path.split("/").pop() || path;
   const label = line != null ? `${name}:${line}` : name;
   const openMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -51,6 +54,7 @@ export function FileChip({ path, line, exp, onOpenFile, children }: {
     setMenu(fileContextMenuTarget(event, path));
     setLocation(null);
     setNote(null);
+    previewKey.current = null;
     const request = ++sequence.current;
     void (async () => {
       const projects = await workspace.queryClient.fetchQuery(workspace.queries.listProjectsQuery());
@@ -59,17 +63,23 @@ export function FileChip({ path, line, exp, onOpenFile, children }: {
       const tab = parseFilePath(path, project.repoPath, scope.sessionId ?? undefined, project.artifactsDir ?? project.filesDir, project.slug);
       if (!tab) throw new Error(m.file_tree_location_unavailable());
       if (exp && (tab.source == null || tab.source === "repo")) throw new Error(m.file_tree_location_historical());
-      const loaded = await workspace.queryClient.fetchQuery({ ...workspace.queries.resolvedFileQuery(scope.projectId, tab.path, tab.source ?? "repo", tab.sessionId, tab.ref), staleTime: 0 });
+      if (request !== sequence.current) return;
+      const options = workspace.queries.resolvedFileQuery(scope.projectId, tab.path, tab.source ?? "repo", tab.sessionId, tab.ref);
+      previewKey.current = options.queryKey;
+      if (previewIsOpen()) throw new Error(m.file_tree_location_preview_unverified());
+      const loaded = await workspace.queryClient.fetchQuery({ ...options, staleTime: 0 });
       if (loaded.file.notFound || (loaded.source === "checkout" && loaded.file.root === "branch")) throw new Error(m.file_tree_location_unavailable());
       const selected = { path: loaded.file.path, source: loaded.source, ...(tab.sessionId ? { sessionId: tab.sessionId } : {}), ...(loaded.source === "checkout" ? { root: loaded.file.root } : {}) };
       const current = await workspace.api.fileLocation(scope.projectId, selected);
       if (request !== sequence.current) return;
+      if (previewIsOpen()) throw new Error(m.file_tree_location_preview_unverified());
       setLocation({ ...selected, expectedPath: current.path });
     })().catch((error: unknown) => { if (request === sequence.current) setNote(error instanceof Error ? error.message : String(error)); });
   };
   const action = async (reveal: boolean) => {
     if (!scope || !location) return;
     try {
+      if (previewIsOpen()) throw new Error(m.file_tree_location_preview_unverified());
       const result = await workspace.api.fileLocation(scope.projectId, location, reveal);
       if (!reveal) {
         await navigator.clipboard.writeText(result.path);

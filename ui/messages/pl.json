@@ -1,4 +1,5 @@
 {
+  "file_tree_location_preview_unverified": "Zamknij podgląd pliku, aby użyć jego lokalizacji; nie można zweryfikować wyświetlanego źródła.",
   "file_tree_location_unavailable": "Lokalizacja pliku jest niedostępna. Otwórz plik ponownie i spróbuj jeszcze raz.",
   "file_tree_location_historical": "To odwołanie wskazuje wersję historyczną bez potwierdzonej lokalizacji na dysku.",
   "$schema": "https://inlang.com/schema/inlang-message-format",

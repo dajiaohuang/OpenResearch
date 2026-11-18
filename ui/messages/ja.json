@@ -1,4 +1,5 @@
 {
+  "file_tree_location_preview_unverified": "場所を使用するにはファイルのプレビューを閉じてください。表示されたソースを確認できません。",
   "file_tree_location_unavailable": "ファイルの場所を確認できません。ファイルを開き直して再試行してください。",
   "file_tree_location_historical": "この参照は過去のバージョンで、確認済みのディスク上の場所はありません。",
   "workspace_active_experiments": "進行中の実験",

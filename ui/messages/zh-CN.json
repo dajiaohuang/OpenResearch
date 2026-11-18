@@ -1,4 +1,5 @@
 {
+  "file_tree_location_preview_unverified": "请关闭文件预览后再使用文件位置；无法验证当前显示内容的来源。",
   "file_tree_location_unavailable": "文件位置不可用。请重新打开文件后重试。",
   "file_tree_location_historical": "此引用是历史版本，没有可验证的磁盘位置。",
   "workspace_active_experiments": "活跃实验",

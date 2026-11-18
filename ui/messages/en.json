@@ -1,4 +1,5 @@
 {
+  "file_tree_location_preview_unverified": "Close this file preview to use its location; its displayed source cannot be verified.",
   "file_tree_location_unavailable": "The file location is unavailable. Reopen the file and try again.",
   "file_tree_location_historical": "This reference is a historical version and has no verified disk location.",
   "workspace_active_experiments": "Active Experiments",

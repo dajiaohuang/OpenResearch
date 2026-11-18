@@ -3,11 +3,12 @@ import test from "node:test";
 import { act, createElement } from "react";
 import { FileChip, FileScopeContext } from "../src/components/FileReference.tsx";
 import { Md } from "../src/components/Md.tsx";
+import { QueryObserver } from "@tanstack/react-query";
 import { RuntimeContext } from "../src/RemoteRuntime.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { find, render, serve, settle } from "./render.mjs";
 
-async function openChip({ remote = false, exp, changed = false, figure = false } = {}) {
+async function openChip({ remote = false, exp, changed = false, figure = false, preview = false } = {}) {
   const requests = [];
   serve((path, init) => {
     requests.push({ path, init });
@@ -24,9 +25,12 @@ async function openChip({ remote = false, exp, changed = false, figure = false }
     createElement(FileScopeContext, { value: { projectId: "p", sessionId: "s" } }, figure
       ? createElement(Md, { text: '[Table 1](https://example.com/paper)\n\n![Results](table1.png "Table 1. Results")', onOpenFile() {} })
       : createElement(FileChip, { path: "report.md", exp, onOpenFile() {} }))));
+  const observer = preview ? new QueryObserver(view.workspace.queryClient, view.workspace.queries.resolvedFileQuery("p", "report.md", "repo", "s")) : null;
+  const unsubscribe = observer?.subscribe(() => {});
+  if (observer) await settle();
   await act(async () => view.container.querySelector("button").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 })));
   await settle();
-  return { view, requests };
+  return { view, requests, unsubscribe };
 }
 
 test("local file action resolves the preview checkout before copying", async (t) => {
@@ -73,5 +77,28 @@ test("a numbered figure link exposes the file context menu", async () => {
   assert.ok(find('[role="menuitem"]', m.artifacts_copy_path()));
   const request = requests.find((item) => item.path === "/api/projects/p/file/location");
   assert.equal(JSON.parse(request.init.body).path, "table1.png");
+  await view.unmount();
+});
+
+test("an open preview without source identity disables location actions", async () => {
+  const { view, requests, unsubscribe } = await openChip({ preview: true });
+  assert.ok(document.body.textContent.includes(m.file_tree_location_preview_unverified()));
+  assert.ok(!find('[role="menuitem"]', m.artifacts_copy_path()));
+  assert.ok(!requests.some((request) => request.path === "/api/projects/p/file/location"));
+  unsubscribe();
+  await view.unmount();
+});
+
+test("a preview opened after the menu prevents copying", async (t) => {
+  const clipboard = t.mock.method(navigator.clipboard, "writeText", async () => {});
+  const { view, requests } = await openChip();
+  const observer = new QueryObserver(view.workspace.queryClient, view.workspace.queries.resolvedFileQuery("p", "report.md", "repo", "s"));
+  const unsubscribe = observer.subscribe(() => {});
+  await settle();
+  await act(async () => find('[role="menuitem"]', m.artifacts_copy_path()).click());
+  await settle();
+  assert.equal(clipboard.mock.calls.length, 0);
+  assert.equal(requests.filter((request) => request.path === "/api/projects/p/file/location").length, 1);
+  unsubscribe();
   await view.unmount();
 });
