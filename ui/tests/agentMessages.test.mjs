@@ -16,4 +16,6 @@ test("a preview is the first line without the markdown that leads or marks it", 
   assert.equal(firstLine("\n# **Outer** `Wilds`\n\nIt resets."), "Outer Wilds");
   assert.equal(firstLine("> - quoted"), "quoted");
   assert.equal(firstLine("Probably *Outer Wilds*, not snake_case_name."), "Probably Outer Wilds, not snake_case_name.");
+  assert.equal(firstLine("-42 degrees C"), "-42 degrees C");
+  assert.equal(firstLine("- item"), "item");
 });
