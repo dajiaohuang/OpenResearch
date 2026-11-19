@@ -43,7 +43,11 @@ at a time, and announces the result with `usage.changed`; `POST
 /api/usage/refresh` re-reads them all. An account now signed in as someone else
 drops its snapshot. A running chat whose
 agent says its limits moved re-reads its account. A failed read keeps the last
-values beside the reason; an API key or a sign-out has no plan. A Codex reset is spent
+values beside the reason; an API key or a sign-out has no plan, and a subscription
+token whose limits can't be read is a plan without limits. For an account that
+may be on a plan, orx knows only what its tokens would cost at API prices, so the
+dashboard leaves its spend out of the week and the chat, and shows none while the
+plans are unread. A Codex reset is spent
 the same way, through `account/rateLimitResetCredit/consume` with the
 dashboard's key for that click, so a retry never spends two, and then
 re-reads that account.
@@ -203,7 +207,7 @@ Homes (`src/local/native_store.rs`) let an agent behave as the user set it up wh
 | OpenCode | session database | configuration, read in place |
 | Antigravity, ACP agents | nothing | home and session store |
 
-Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
+Links are reconciled when an agent starts, and before every Codex turn even on a running process. A Claude Code or Codex one-shot (a title, a watcher's look) runs in a home of its own under `agents/one-shot` that holds the account's settings alone, reads no project's settings and runs no hooks: the user's memory, instructions, skills and plugins would add thousands of tokens to a request that brings its own context. The sign-in stays in the account's home, never copied or hard-linked: Claude Code reads it there through `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and Codex through a symbolic link, so on Windows, whose links fall back to hard links and copies, a Codex one-shot keeps the account's home. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
 
 Claude Code and Codex profiles keep separate sign-ins in private homes under
 `agents/profiles`, recorded in `agent-profiles.json`. They share the user's
@@ -255,7 +259,7 @@ The bridge endpoint grants permissions, so it takes a per-child token that each 
 
 **A held request never allows by accident.** A request outliving its turn is denied, an interrupted turn denies everything it was waiting on, a transport error denies, and the bridge denies an unanswered request after a long timeout. The no-output watchdog ignores a turn blocked on the user, whose thinking time is unbounded.
 
-Where an agent offers a hook or plugin, it stamps each shell command with the issuing model, so a run records which model launched it (`src/commands/invocation_gate.rs`).
+Claude Code inherits its invoking model through the process environment; a model change resumes a fresh child to refresh that context. OpenCode supplies each shell call's model and provider through its plugin, Codex resolves its running native turn, and Antigravity stamps calls through its hook, so runs record which model launched them.
 
 ## Turns survive restarts
 

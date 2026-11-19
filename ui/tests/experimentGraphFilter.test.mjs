@@ -21,6 +21,13 @@ test("an invalid cycle terminates when finding context", () => {
   assert.deepEqual([...result.visible].sort(), ["a", "b"]);
 });
 
+test("filters displayed flagged and revising runs without counting them as done", () => {
+  const nodes = ["flagged", "flagged_ended", "revising", "done", "running"].map((status) => ({ id: status, title: status, slug: status, status }));
+  assert.deepEqual([...graphMatches(nodes, [], "", "flagged").matching], ["flagged", "flagged_ended"]);
+  assert.deepEqual([...graphMatches(nodes, [], "", "revising").matching], ["revising"]);
+  assert.deepEqual([...graphMatches(nodes, [], "", "done").matching], ["done"]);
+});
+
 test("a deep graph retains every ancestor of a matching leaf", () => {
   const nodes = Array.from({ length: 5000 }, (_, i) => ({ id: String(i), title: i === 4999 ? "needle" : "", slug: `node-${i}`, status: null }));
   const edges = nodes.slice(1).map((node, i) => ({ source: String(i), target: node.id }));

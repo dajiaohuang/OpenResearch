@@ -8,7 +8,7 @@ export function graphMatches(
   const term = query.trim().toLocaleLowerCase();
   const matching = new Set(nodes.filter((node) =>
     (!term || `${node.title}\n${node.slug}`.toLocaleLowerCase().includes(term)) &&
-    (status === "all" || node.status === status),
+    (status === "all" || node.status === status || (status === "flagged" && node.status === "flagged_ended")),
   ).map((node) => node.id));
   const parent = new Map(edges.map((edge) => [edge.target, edge.source]));
   const visible = new Set(matching);

@@ -69,3 +69,24 @@ test("a large chain renders its controls without changing a saved viewport", asy
   await rerender(createElement(TreeView, props));
   assert.deepEqual(changes, []);
 });
+
+test("status filter follows the run status displayed in the graph", async () => {
+  serve(() => ({}));
+  const experiments = ["flagged", "revising", "done"].map((id) => ({ id, projectId: "p", slug: id, title: id, parentExperimentId: null, branchName: id, createdAt: 1, archived: false }));
+  const runs = [
+    { id: "rf", experimentId: "flagged", status: "done", createdAt: 1, monitor: { flag: { id: "f", state: "waiting", mode: "copilot" } } },
+    { id: "rr", experimentId: "revising", status: "cancelled", createdAt: 1, monitor: { tone: "revising" } },
+    { id: "rd", experimentId: "done", status: "done", createdAt: 1 },
+  ];
+  const noop = () => {};
+  const props = { experiments, runs, archiveActions: new Map(experiments.map((e) => [e.id, {}])), showArchived: true, project: { id: "p" }, onOpenView: noop, onOpenCode: noop, onArchive: noop, onDelete: noop, agentSessionId: null, onShowProjectScope: noop, onRestoreRegion: noop, viewport: null, onViewportChange: noop };
+  const { container } = await render(createElement(TreeView, props));
+  await settle();
+  const status = container.querySelector(`select[aria-label="${m.settings_page_status()}"]`);
+  for (const [value, expected] of [["flagged", "flagged"], ["revising", "revising"], ["done", "done"]]) {
+    await act(async () => { status.value = value; status.dispatchEvent(new Event("change", { bubbles: true })); });
+    const results = container.querySelector(`[role="region"][aria-label="${m.tree_search_graph()}"]`);
+    assert.ok(results.textContent.includes(`${expected} (${expected})`));
+    for (const other of experiments.filter((e) => e.id !== expected)) assert.ok(!results.textContent.includes(`${other.id} (${other.id})`));
+  }
+});

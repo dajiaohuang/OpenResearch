@@ -25,7 +25,6 @@ import { GitHubMark } from "./BackendLogos";
 import {
   githubBranchUrl,
   fmtNumber,
-  timeAgo,
   type Experiment,
   type Project,
   type Run,
@@ -33,6 +32,7 @@ import {
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
+import { RunTiming } from "./RunTiming";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
 import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
@@ -222,7 +222,8 @@ function runSquareClass({ status, stale }: RunDisplay): string {
   if (stale) return "stale";
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling") return "live";
+  if (status === "flagged" || status === "flagged_ended") return "flag";
+  if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling" || status === "revising") return "live";
   return "other";
 }
 
@@ -282,7 +283,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
                 return (
                   <span
                     key={run.id}
-                    className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border [&.stale]:border-[1.5px] [&.stale]:border-accent-amber ${runSquareClass(square)}`}
+                    className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.flag]:bg-mark-amber [&.other]:border-[1.5px] [&.other]:border-border [&.stale]:border-[1.5px] [&.stale]:border-accent-amber ${runSquareClass(square)}`}
                     title={statusLabel(square.status, square.stopping)}
                   />
                 );
@@ -292,7 +293,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             <span>{m.tree_view_no_runs()}</span>
           )}
           <span className="flex-1" />
-          {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
+          {latestRun && <RunTiming run={latestRun} />}
         </div>
       </div>
       {/* Direct view shortcuts — code always, logs once there's a run, charts once it logs to Trackio. */}
@@ -611,7 +612,7 @@ export function TreeView({
 
   const matches = useMemo(() => graphMatches(nodes.flatMap((node) => node.type === "exp" ? [{
     id: node.id, title: node.data.exp.title ?? "", slug: node.data.exp.slug,
-    status: node.data.latestRun?.status ?? null,
+    status: node.data.latestRun ? runDisplay(node.data.latestRun).status : null,
   }] : []), edges, search, status), [nodes, edges, search, status]);
   const filteredNodes = useMemo(() => filterActive ? nodes.filter((node) => matches.visible.has(node.id)).map((node) => ({
     ...node, className: matches.matching.has(node.id) ? "ring-2 ring-focus rounded-md" : undefined,
@@ -661,6 +662,8 @@ export function TreeView({
         <option value="running">{m.status_running()}</option>
         <option value="done">{m.status_done()}</option>
         <option value="failed">{m.status_failed()}</option>
+        <option value="flagged">{m.status_flagged()}</option>
+        <option value="revising">{m.status_revising()}</option>
       </select></label>
       {filterActive && <button type="button" className="rounded-sm px-2 py-1 text-sm hover:bg-surface" onClick={() => { setSearch(""); setStatus("all"); }}>{m.artifacts_filter_clear()}</button>}
       {filterActive && <div className="max-h-40 w-full overflow-y-auto" role="region" aria-label={m.tree_search_graph()}>
@@ -674,7 +677,7 @@ export function TreeView({
     </div>
     <ReactFlow
       data-keyboard-list
-      className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
+      className="@container [&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // Saved viewports initialize on mount; a new scope needs its own canvas.
       key={`${project.id}:${agentSessionId ?? "project"}`}
       nodes={filteredNodes}
